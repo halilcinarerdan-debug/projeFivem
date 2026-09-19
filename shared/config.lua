@@ -54,8 +54,15 @@ Config.Bureau = {
     },
     TowerRange                 = 1200.0,
     BaseSearchRadius           = 2500.0,
-    TriangulationDecryptionGain= 0.04,
-    PatternAnalysisGain        = 0.06,
+
+    -- Triangulation AKTİF bir oyuncu hatasının (şifresiz telsiz kullanımı)
+    -- ANLIK bedelidir - zamana yayılan pasif bir oran değildir, bu yüzden
+    -- "Yarılanma Ömrü" türetmesine girmez. Doğrudan bir sabit olarak kalır,
+    -- ama "ilk 1 saat çöküşü" riskini azaltmak için 0.04'ten 0.025'e
+    -- yumuşatıldı (yaklaşık %37 daha az sert; hâlâ hatanın gerçek bir
+    -- bedeli var, sadece anlık ölüm değil).
+    TriangulationDecryptionGain= 0.025,
+
     RaidDecryptionThreshold    = 0.90,
     AnalysisIntervalSeconds    = 300,
     PropagandaGeometricFactor  = 1.15,
@@ -70,10 +77,10 @@ Config.Bureau = {
     -- qb-phone Canlı Yayın / Siber Propaganda Köprüsü. Hype, propagandaMomentum'un
     -- kendisini besler (Recruit_chance zaten momentum'a bağlı); bedel olarak en
     -- yakın trap house'un cyber-leak heatmap'i ve deşifre katsayısı da yükselir.
+    -- (Gerçek per-tick artım oranları aşağıda "YARILANMA ÖMRÜ" bölümünde
+    -- gerçek-zaman hedeflerinden TÜRETİLİR, burada magic number yazılmaz.)
     LivestreamHypeGeometricFactor    = 1.05,
     LivestreamHypeIncrementPerTick   = 0.05,
-    LivestreamHeatIncrementPerTick   = 0.02,
-    LivestreamDecryptionGainPerTick  = 0.005,
 
     -- Fiziksel Şafak Baskını mürettebat/breach matrisi (deterministik, RNG yok).
     RaidBaseSquadSize          = 2,
@@ -83,6 +90,49 @@ Config.Bureau = {
     RaidBaseEscapeWindowSeconds = 20,
     RaidDeadZoneEscapeBonusSeconds = 25 -- trap house bir kör noktaya yakınsa Büro telsizi de bozulur
 }
+
+-- =====================================================================
+-- YARILANMA ÖMRÜ / GERÇEK-ZAMAN DENGELEMESİ (OYNANABİLİRLİK KİLİDİ)
+--
+-- Amaç: "1. saatte kaçınılmaz Hard-Wipe" riskini YAPISAL olarak ortadan
+-- kaldırmak. Bunu magic-number oranları küçültmek yerine, her PASİF
+-- (zamana bağlı, tick-tabanlı) birikim için önce "gerçek hayatta kaç
+-- gün/saat/dakika sürsün" diye bir HEDEF tanımlıyoruz, sonra gerçek
+-- per-tick katsayıyı bu hedeften cebirsel olarak TÜRETİYORUZ. Böylece
+-- başka bir model (örn. DeepSeek R1) tek bir "*RealDays"/"*RealHours"
+-- alanını değiştirerek dengeyi yeniden ayarlayabilir; hardcoded 0.0006
+-- gibi bir sayının NEREDEN geldiğini tahmin etmesi gerekmez.
+--
+-- Genel türetme formülü (sabit-adımlı Euler birikimi, doğrusal yaklaşım):
+--   toplam_tick_sayisi = (hedef_sure_saniye) / (tick_araligi_saniye)
+--   gain_per_tick       = esik_degeri / toplam_tick_sayisi
+-- Yani "mükemmel/en kötü koşullarda dahi" (regularity=1.0, heat=0 veya
+-- sürekli aktif kalma gibi) tam hedef süre sonunda eşiğe ulaşılır; daha
+-- gevşek koşullarda süre otomatik olarak UZAR (asla kısalmaz).
+-- =====================================================================
+
+-- Pasif örüntü analizi (Bureau.Tick, AnalysisIntervalSeconds'ta bir çalışır):
+-- oyuncu HİÇBİR hata yapmasa, sadece mükemmel düzenli çalışsa bile bir trap
+-- house'un sıfırdan RaidDecryptionThreshold'a (0.90) ulaşması için hedeflenen
+-- GERÇEK GÜN sayısı. Mekanik matematiksel olarak DOĞRU işler, ama saf pasif
+-- zaman bunu tetiklemek için günler ister - asıl risk oyuncunun AKTİF
+-- hatalarından (triangulation/propaganda/canlı yayın) gelir.
+Config.Bureau.PatternFullDecryptionRealDays = 5.0
+Config.Bureau.PatternAnalysisGain =
+    Config.Bureau.RaidDecryptionThreshold
+    / ((Config.Bureau.PatternFullDecryptionRealDays * 86400.0) / Config.Bureau.AnalysisIntervalSeconds)
+
+-- Canlı yayın AKTİF ve sürekli bir risktir (oyuncunun kendi seçimi); pasif
+-- sistemden çok daha hızlı ilerlemeli ki "bedel" gerçekten hissedilsin, ama
+-- "1 dakika yayın = ölüm" da OLMAMALI. Hedefler: sürekli yayınla heatmap
+-- tavana bu GERÇEK DAKİKADA ulaşır; SADECE canlı yayının (başka hiçbir
+-- katkı olmadan) tek başına 0.90 deşifreye ulaşması bu GERÇEK SAATTE olur.
+Config.Bureau.LivestreamHeatFullSaturationRealMinutes = 20.0
+Config.Bureau.LivestreamAloneFullDecryptionRealHours  = 3.0
+Config.Bureau.LivestreamHeatIncrementPerTick =
+    Config.Bureau.CyberLeakMaxIntensity / (Config.Bureau.LivestreamHeatFullSaturationRealMinutes * 60.0)
+Config.Bureau.LivestreamDecryptionGainPerTick =
+    Config.Bureau.RaidDecryptionThreshold / (Config.Bureau.LivestreamAloneFullDecryptionRealHours * 3600.0)
 
 Config.Kitchen = {
     WorkFactor = {
@@ -105,7 +155,14 @@ Config.Kitchen = {
     BurnoutRecoveryRateFloor      = 0.005,
     CortisolDeviationThreshold    = 0.8,
     CortisolDeviationDistance     = 100.0,
-    WithdrawalGainPerAddictionPoint = 0.05,
+
+    -- OYNANABİLİRLİK KİLİDİ: eski değer (0.05) addiction_level>=20 olan HER
+    -- botu TEK bir saatlik döngüde (Kitchen.ProcessHourCycle) tam yoksunluğa
+    -- (withdrawal_index=1.0) itiyordu - bu da anlık hırsızlık/sızma zinciri
+    -- demekti. 0.02'ye düşürüldü: aynı bot için tam yoksunluğa ulaşmak artık
+    -- ~2.5 gerçek saat sürer (gerçek yoksunluk sendromunun saatler içinde
+    -- başlaması hâlâ korunur, ama "ilk saatte kaçınılmaz çöküş" kaldırılır).
+    WithdrawalGainPerAddictionPoint = 0.02,
     WithdrawalSkillPenaltyThreshold = 0.7,
     WithdrawalSkillPenaltyMultiplier= 0.5,
     TheftWithdrawalThreshold      = 1.0,
@@ -236,6 +293,16 @@ Config.Supplier = {
     TrustForensicLeakPenalty    = 0.10,
     TrustHeatmapPenaltyFactor   = 0.20,
     TrustRecoveryPerCleanPickup = 0.03,
+
+    -- OYNANABİLİRLİK KİLİDİ / NEFES ALMA PENCERESİ: temas edilmese de güven
+    -- yavaşça DefaultTrust'a doğru sürüklenir (üstel/"Newton soğuma yasası"
+    -- tarzı yaklaşım - bkz. logistics.lua ApplyPassiveTrustDrift). Yarı-ömür
+    -- (gap'in yarısının kapanma süresi) ~ln(0.5)/ln(1-oran) gün'dür; oran
+    -- 0.02 için bu ~34 gerçek gündür: kötü bir seri oyuncuyu SONSUZA DEK
+    -- SupplyCutTrustThreshold altında hapsetmez, ama hızlı bir "reset" de
+    -- değildir - gerçek hayat günlerine yayılan yavaş bir iyileşmedir.
+    PassiveTrustRecoveryPerRealDay = 0.02,
+    PassiveTrustRecoveryTarget     = 0.5,
 
     PriceMultiplierFloor   = 1.0,
     PriceMultiplierCeiling = 4.0,

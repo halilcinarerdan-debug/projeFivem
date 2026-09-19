@@ -7,12 +7,19 @@ local ACTIVITY_SKILL_MAP = {
     cyber_ops    = 'skill_cyber'
 }
 
+-- FORMÜL (asimptotik/lojistik öğrenme eğrisi - "diminishing returns"):
+--   skill' = skill + (1.0 - skill) * SkillGrowthRate
+-- Yorum: bu, sürekli zamanda dS/dt = k*(1-S) diferansiyel denkleminin
+-- ayrık (discrete, dt=1 dakika) Euler adımıdır; kapalı-form çözümü
+-- S(t) = 1 - (1-S0)*e^(-k*t) olan klasik bir "doyum eğrisi"dir (RC devresi
+-- şarjı veya Newton soğuma yasasıyla AYNI matematiksel aile). skill 1.0'a
+-- ASLA ulaşmaz ama sonsuz yaklaşır -> tavan taşması riski yapısal olarak yok.
+-- KARMAŞIKLIK: O(1).
 local function ApplyOrganicSkillGrowth(bot)
     local skillKey = ACTIVITY_SKILL_MAP[bot.state.activity]
     if not skillKey then return end
 
     local current = bot.psychology[skillKey] or 0.0
-    -- Asymptotik öğrenme eğrisi: 1.0'a yaklaştıkça büyüme yavaşlar, tavanı asla aşmaz.
     bot.psychology[skillKey] = Matrix.Clamp(
         current + ((1.0 - current) * Config.Kitchen.SkillGrowthRate),
         0.0, 1.0
@@ -40,6 +47,18 @@ local function ApplyCortisolDeviation(bot)
     Matrix.Log('KITCHEN', '[KORTIZOL SAPMASI] Bot #%d lojistik koordinatı %.0fm saptırıldı.', bot.id, Config.Kitchen.CortisolDeviationDistance)
 end
 
+-- FORMÜL SETİ (her GERÇEK dakikada bir main.lua master ticker'ından çağrılır):
+--   fatigue' = fatigue + workFactor*(2.0 - cognitive_shifter)   [birikimli, 0-1 clamp]
+--   cortisol' = cortisol - base_recovery_rate*resilience         [her döngüde toparlanma]
+--   cortisol' += FatigueCortisolBleed                            [SADECE fatigue>0.8 ise]
+-- NÖRAL EROZYON (kalıcı hasar, OYNANABİLİRLİK KİLİDİ ile korunur): fatigue
+-- kritik eşiği (0.9) GERÇEK 3600 saniye (1 saat) SÜREKLİ aşarsa -deterministik
+-- bir zaman-damgası karşılaştırmasıyla, sayaç değil- resilience %10 düşer VE
+-- base_cortisol_recovery_rate kalıcı olarak %20 küçülür (BurnoutRecoveryRateFloor
+-- altına asla inmez). Bu, "anında çöküş" değil "1 saatlik sürdürülebilir aşırı
+-- çalışmanın kalıcı bedeli" mantığıdır - bkz. config.lua'daki Yarılanma Ömrü notu.
+-- KARMAŞIKLIK: O(1) per bot per dakika; N bot için toplam O(N) (master
+-- ticker zaten tüm botları geziyor, ek bir tarama YOK).
 function Matrix.Kitchen.ProcessMinuteCycle(bot)
     local workFactor = Config.Kitchen.WorkFactor[bot.state.activity] or Config.Kitchen.WorkFactor.idle
 
@@ -88,6 +107,13 @@ function Matrix.Kitchen.ProcessMinuteCycle(bot)
     Matrix.PersistBot(bot)
 end
 
+-- FORMÜL (her GERÇEK saatte bir): withdrawal' = min(1.0, withdrawal +
+-- addiction_level * WithdrawalGainPerAddictionPoint). addiction_level [0,100]
+-- aralığında olduğundan bu DOĞRUSAL bir birikimdir, üst sınır 1.0'da SERT
+-- kesilir (asimptotik değil - gerçek yoksunluk sendromunun "aniden patlak
+-- verme" doğasını yansıtır). OYNANABİLİRLİK KİLİDİ: katsayı, addiction_level
+-- >=20 olan bir botun TEK bir saatlik döngüde tam yoksunluğa ulaşmasını
+-- (0.05'te olurdu) önlemek için 0.02'ye ayarlandı - bkz config.lua.
 function Matrix.Kitchen.ProcessHourCycle(bot)
     if bot.biology.addiction_level > 0.0 then
         bot.biology.withdrawal_index = math.min(
@@ -97,6 +123,9 @@ function Matrix.Kitchen.ProcessHourCycle(bot)
     end
 end
 
+-- Withdrawal eşiği (0.7) üzerinde TÜM teknik beceriler (chemistry/cyber/
+-- logistics fark etmez, skillKey parametrik) %50 cezalandırılır - motorik
+-- koordinasyon çöküşünün genel formülü budur. KARMAŞIKLIK: O(1).
 function Matrix.Kitchen.GetEffectiveSkill(actor, skillKey)
     local baseSkill = (actor.psychology and actor.psychology[skillKey]) or 0.0
     local withdrawalIndex = (actor.biology and actor.biology.withdrawal_index) or 0.0
@@ -147,6 +176,18 @@ local function BroadcastCleanBotTip(trapHouseId, thiefDnaId, excludeBotId)
         thiefDnaId, cleanId, cleanBot.name)
 end
 
+-- FORMÜL SETİ (Mutfak Motoru - seyreltme/kesme):
+--   theoretical_purity = (rawWeight*rawPurity) / (rawWeight+agentWeight)   [kütle korunumu]
+--   error_coefficient  = (1-skill_chemistry)*0.5 + fatigue*0.3 + cortisol*0.2
+--   output_purity      = theoretical_purity * (1 - error_coefficient)
+--   waste_volume       = agentWeight * error_coefficient * 0.2
+-- Yorum: error_coefficient üç bağımsız insani faktörün AĞIRLIKLI TOPLAMIDIR
+-- (ağırlıklar 0.5/0.3/0.2 -> toplam 1.0, yani error_coefficient teorik
+-- olarak [0,1] aralığında kalır çünkü her terim de [0,1] aralığındadır).
+-- theft_amount SADECE withdrawal_index >= TheftWithdrawalThreshold (1.0)
+-- olduğunda tetiklenir - eşik-tabanlı, ADIM fonksiyonu (RNG değil, keskin
+-- bir davranışsal kriz noktası). KARMAŞIKLIK: O(1); tek senkron DB insert
+-- (event-tetiklemeli, master ticker'ı bloklamaz).
 function Matrix.Kitchen.ProcessCook(actorRef, trapHouseId, rawWeight, rawPurity, agentWeight)
     local actor = Matrix.ResolveActor(actorRef)
     if not actor then return nil end
@@ -203,6 +244,12 @@ function Matrix.Kitchen.ProcessCook(actorRef, trapHouseId, rawWeight, rawPurity,
     }
 end
 
+-- FORMÜL: I_snitch = 0.3*snitch_tendency + 0.3*economic_pressure +
+--   0.2*cortisol + 0.2*fear_factor - 0.2*resilience
+-- Ağırlıklı toplam [-0.2, 1.0] aralığında (resilience terimi negatif katkı
+-- yapar); Config.Kitchen.SnitchThreshold (0.75) ile karşılaştırılır. Her
+-- terim bağımsız gözlemlenebilir bir bot alanına karşılık gelir -> bu formül
+-- deterministiktir ve /yakalatest ile RNG olmadan tekrar üretilebilir.
 function Matrix.Kitchen.ComputeSnitchIndex(bot)
     return (bot.psychology.snitch_tendency * 0.3)
         + (bot.psychology.economic_pressure * 0.3)
@@ -252,3 +299,89 @@ RegisterNetEvent('matrix:server:reportCortisolTrigger', function(spikeType)
     local src = source
     Matrix.Kitchen.AdjustCortisol({ kind = 'player', source = src }, spikeType)
 end)
+
+-- =====================================================================
+-- MONOKROM TAKTİK DEBUG PANELİ (herkese açık test grubu, restricted=false)
+-- Gerçek oyun temposu: fatigue/cortisol her GERÇEK dakikada bir
+-- (ProcessMinuteCycle), withdrawal her GERÇEK saatte bir (ProcessHourCycle)
+-- işlenir. Bu komutlar o beklemeyi atlayıp döngüleri anlık tetikler.
+-- =====================================================================
+local function Reply(src, msg)
+    if type(src) == 'number' and src > 0 then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[KITCHEN]', msg } })
+    else
+        print(('[MATRIX:KITCHEN:CONSOLE] %s'):format(msg))
+    end
+end
+
+-- /mutfaktest [botId] [trapHouseId] [hamAgirlik] [hamSaflik] [ajanAgirlik] -
+-- ProcessCook'u bir BOT aktörü için doğrudan çalıştırır (normal event
+-- köprüsü sadece 'player' aktörünü destekler). theoretical_purity/
+-- error_coefficient/output_purity formüllerini bot skill/fatigue/cortisol
+-- değerleriyle test eder. trapHouseId GERÇEKTEN var olmalı (matrix_kitchen_
+-- batches.trap_house_id -> matrix_trap_houses FK constraint'i nedeniyle).
+RegisterCommand('mutfaktest', function(src, args)
+    local botId = tonumber(args[1])
+    local trapHouseId = tonumber(args[2])
+    local rawWeight  = tonumber(args[3]) or 100.0
+    local rawPurity  = tonumber(args[4]) or 0.8
+    local agentWeight= tonumber(args[5]) or 50.0
+    if not botId or not Matrix.Bots[botId] or not trapHouseId or not Matrix.TrapHouses[trapHouseId] then
+        Reply(src, 'Kullanim: /mutfaktest [botId] [trapHouseId (gerçek olmalı)] [hamAgirlik] [hamSaflik] [ajanAgirlik]'); return
+    end
+
+    local result = Matrix.Kitchen.ProcessCook({ kind = 'bot', id = botId }, trapHouseId, rawWeight, rawPurity, agentWeight)
+    if not result then Reply(src, 'Test başarısız.'); return end
+
+    Reply(src, ('Teorik:%.3f Hata:%.3f Çıkış-Saflık:%.3f Çalıntı:%.1fg Rakip-Sızma:%s'):format(
+        result.theoretical_purity, result.error_coefficient, result.output_purity,
+        result.theft_amount, tostring(result.rival_infiltration)))
+end, false)
+
+-- /dakikadongusu [botId] - ProcessMinuteCycle'ı 60sn beklemeden anlık çalıştırır.
+RegisterCommand('dakikadongusu', function(src, args)
+    local botId = tonumber(args[1])
+    local bot = botId and Matrix.Bots[botId]
+    if not bot then Reply(src, 'Kullanim: /dakikadongusu [botId]'); return end
+
+    Matrix.Kitchen.ProcessMinuteCycle(bot)
+    Reply(src, ('Bot #%d dakika döngüsü çalıştı. Yorgunluk:%.3f Kortizol:%.3f Chem:%.3f'):format(
+        botId, bot.biology.fatigue_level, bot.biology.cortisol_level, bot.psychology.skill_chemistry))
+end, false)
+
+-- /saatdongusu [botId] - ProcessHourCycle'ı 3600sn beklemeden anlık çalıştırır.
+RegisterCommand('saatdongusu', function(src, args)
+    local botId = tonumber(args[1])
+    local bot = botId and Matrix.Bots[botId]
+    if not bot then Reply(src, 'Kullanim: /saatdongusu [botId]'); return end
+
+    Matrix.Kitchen.ProcessHourCycle(bot)
+    Reply(src, ('Bot #%d saat döngüsü çalıştı. Yoksunluk:%.3f'):format(botId, bot.biology.withdrawal_index))
+end, false)
+
+-- /yakalatest [botId] [trapHouseId] - OnCaptured'ı (I_snitch formülü) doğrudan
+-- tetikler; normalde bir baskın/çatışma sonrası dolaylı çağrılır. trapHouseId
+-- GERÇEKTEN var olmalı (matrix_snitch_events'in FK constraint'i nedeniyle).
+RegisterCommand('yakalatest', function(src, args)
+    local botId = tonumber(args[1])
+    local trapHouseId = tonumber(args[2])
+    if not botId or not Matrix.Bots[botId] or not trapHouseId or not Matrix.TrapHouses[trapHouseId] then
+        Reply(src, 'Kullanim: /yakalatest [botId] [trapHouseId (gerçek olmalı)]'); return
+    end
+
+    local snitchIndex, didSnitch = Matrix.Kitchen.OnCaptured(botId, trapHouseId)
+    Reply(src, ('Bot #%d yakalandı. I_snitch=%.3f İhbar:%s'):format(botId, snitchIndex, tostring(didSnitch)))
+end, false)
+
+-- /kortizolsicramasi [botId] [gunshot|bureau_vehicle] - AdjustCortisol'ı bir
+-- BOTA uygular (main.lua'daki /kortizoltetikle sadece çağıran oyuncuyu hedefler).
+RegisterCommand('kortizolsicramasi', function(src, args)
+    local botId = tonumber(args[1])
+    local spikeType = args[2] or 'gunshot'
+    if not botId or not Matrix.Bots[botId] then
+        Reply(src, 'Kullanim: /kortizolsicramasi [botId] [gunshot|bureau_vehicle]'); return
+    end
+
+    Matrix.Kitchen.AdjustCortisol({ kind = 'bot', id = botId }, spikeType)
+    Reply(src, ('Bot #%d kortizol: %.3f'):format(botId, Matrix.Bots[botId].biology.cortisol_level))
+end, false)

@@ -65,6 +65,32 @@ CreateThread(function()
     Matrix.Bureau.LoadTrapHouses()
 end)
 
+-- Runtime'da yeni bir trap house yaratır (haritada normalde script/harita
+-- entegrasyonundan gelir; buradan hem gerçek bir özellik hem de debug/test
+-- girişi olarak kullanılabilir). Async INSERT + callback ile gerçek
+-- AUTO_INCREMENT id'yi alır (senkron await YOK -> 0 Resmon uyumlu).
+function Matrix.Bureau.CreateTrapHouse(label, coords)
+    if not IsValidCoords(coords) then return false, 'bad_coords' end
+    label = (type(label) == 'string' and label ~= '') and label or 'Yeni Trap'
+
+    MySQL.insert([[
+        INSERT INTO matrix_trap_houses (label, coord_x, coord_y, coord_z, decryption_confidence, cyber_leak_intensity, raid_ordered, created_at)
+        VALUES (?, ?, ?, ?, 0.0, 0.0, 0, NOW())
+    ]], { label, coords.x, coords.y, coords.z },
+    function(insertId)
+        if not insertId then return end
+        Matrix.TrapHouses[insertId] = {
+            id = insertId, label = label, coords = vector3(coords.x, coords.y, coords.z),
+            decryption_confidence = 0.0, raid_ordered = false
+        }
+        cyberLeakHeatmap[insertId] = 0.0
+        patternLog[insertId] = {}
+        Matrix.Log('BUREAU', 'Yeni trap house #%d (%s) oluşturuldu.', insertId, label)
+    end)
+
+    return true
+end
+
 -- =====================================================================
 -- FIND NEAREST
 -- =====================================================================
@@ -146,6 +172,18 @@ end
 
 -- =====================================================================
 -- COMMS TRIANGULATION
+--
+-- FORMÜL (ters-mesafe ağırlıklı üçgenleme, IDW - Inverse Distance Weighting):
+--   estimate = Σ(tower_i.coords * w_i) / Σ(w_i),  w_i = 1 / max(dist_i, 1.0)
+--   narrowedRadius = BaseSearchRadius / N_hitTowers
+--   gain = clamp((TriangulationDecryptionGain / normRadius) * (1+heat) / N, 0, 0.5)
+-- Yorum: IDW, jeodezi/CBS'te GERÇEKTEN kullanılan standart bir enterpolasyon
+-- yöntemidir (en yakın kulelerin ağırlığı yüksek); N kule yakalandığında
+-- arama yarıçapı N ile TERS orantılı küçülür (daha çok kule = daha kesin
+-- konum = daha dar arama alanı = daha yüksek kazanç, çünkü normRadius küçülür
+-- ve gain=sabit/normRadius büyür). heat çarpanı mevcut siber sızıntıyla
+-- ÇARPIMSAL etkileşir (bileşik risk). KARMAŞIKLIK: O(K) burada K =
+-- Config.Bureau.CellTowers eleman sayısı (sabit, küçük - şu an 6).
 -- =====================================================================
 function Matrix.Bureau.OnUnencryptedComms(actorRef, coords)
     if not IsValidCoords(coords) then return nil end
@@ -199,6 +237,17 @@ end
 
 -- =====================================================================
 -- PROPAGANDA
+--
+-- FORMÜL (geometrik/çarpımsal büyüme, tavanlı):
+--   momentum' = min(momentum*GeometricFactor + Increment, MaxMomentum)
+-- Yorum: bu, x_(n+1) = a*x_n + b tipik bir DOĞRUSAL ÖZYİNELEME (linear
+-- recurrence)'dır; a=GeometricFactor (>1, büyütücü), b=Increment (taban
+-- itki). Sabit noktası x* = b/(1-a) NEGATİF olduğundan (a>1), dizi sınır
+-- olmadan büyür - bu yüzden math_min ile MaxMomentum'a SERT tavan konur
+-- (aksi halde birleşik faiz gibi sınırsız büyür). Aynı özyineleme
+-- cyberLeakHeatmap için de kullanılır (CyberLeakGeometricFactor/Increment/Max).
+-- Bu iki değişken (momentum, heat) BAĞIMSIZDIR ama aynı olayla (Propaganda)
+-- birlikte tetiklenir -> bileşik risk. KARMAŞIKLIK: O(1).
 -- =====================================================================
 function Matrix.Bureau.TriggerPropaganda(trapHouseId)
     if type(trapHouseId) ~= 'number' or not Matrix.TrapHouses[trapHouseId] then return 0.0, 0.0 end
@@ -242,6 +291,17 @@ end
 
 -- =====================================================================
 -- TICK (ticker çağırır → await yok)
+--
+-- FORMÜL (pasif örüntü analizi - PatternAnalysisGain, config.lua'daki
+-- "Yarılanma Ömrü" bölümünden TÜRETİLİR, bkz. Config.Bureau.PatternFullDecryptionRealDays):
+--   gain = PatternAnalysisGain * regularity * (1.0 + heat)
+-- regularity = ComputePatternRegularity = max_bucket_sayisi / toplam_sayi
+-- (yani "en sık tekrar eden saat/gün kalıbının" toplam gözlem içindeki
+-- payı - [0,1] aralığında, 1.0 = mükemmel düzenlilik/rutin). heat ise
+-- ÇARPIMSAL bir hız-katsayısı olarak devreye girer: aynı düzenlilikte bile
+-- yüksek siber sızıntı pasif analizi HIZLANDIRIR. KARMAŞIKLIK: O(H) burada
+-- H = Matrix.TrapHouses eleman sayısı (AnalysisIntervalSeconds'ta bir, yani
+-- 300 saniyede bir çalışır - master ticker'ın HER tick'inde DEĞİL).
 -- =====================================================================
 function Matrix.Bureau.Tick()
     for trapHouseId, house in pairs(Matrix.TrapHouses) do
@@ -374,10 +434,10 @@ end)
 -- eklenmesi gerekir (qb-phone'un kendi Live/livestream event handler'ından
 -- TriggerServerEvent('matrix:server:reportLivestreamStart') çağrılır).
 -- =====================================================================
-RegisterNetEvent('matrix:server:reportLivestreamStart', function()
-    local src = source
-    if type(src) ~= 'number' or src <= 0 then return end
-    if LivestreamSessions[src] then return end
+-- Event handler VE debug komutu tarafından paylaşılan çekirdek mantık.
+function Matrix.Bureau.StartLivestream(src)
+    if type(src) ~= 'number' or src <= 0 then return false end
+    if LivestreamSessions[src] then return false end
 
     local state = Matrix.GetOrCreatePlayerState(src)
     LivestreamSessions[src] = {
@@ -388,13 +448,13 @@ RegisterNetEvent('matrix:server:reportLivestreamStart', function()
         trap_house_id = nil
     }
     Matrix.Log('BUREAU', '[CANLI YAYIN BAŞLADI] src=%d, IP çıkışı Büro siber taramasına açıldı.', src)
-end)
+    return true
+end
 
-RegisterNetEvent('matrix:server:reportLivestreamStop', function()
-    local src = source
-    if type(src) ~= 'number' or src <= 0 then return end
+function Matrix.Bureau.StopLivestream(src)
+    if type(src) ~= 'number' or src <= 0 then return false end
     local session = LivestreamSessions[src]
-    if not session then return end
+    if not session then return false end
     LivestreamSessions[src] = nil
 
     local duration = Matrix.Now() - session.started
@@ -405,6 +465,15 @@ RegisterNetEvent('matrix:server:reportLivestreamStop', function()
 
     Matrix.Log('BUREAU', '[CANLI YAYIN BİTTİ] src=%d, süre=%ds, son hype=%.2f, eklenen heat=%.2f',
         src, duration, session.hype, session.heat_added)
+    return true
+end
+
+RegisterNetEvent('matrix:server:reportLivestreamStart', function()
+    Matrix.Bureau.StartLivestream(source)
+end)
+
+RegisterNetEvent('matrix:server:reportLivestreamStop', function()
+    Matrix.Bureau.StopLivestream(source)
 end)
 
 -- Hype tick'i (1000ms, kendi bağımsız thread'i — master ticker'ı kirletmez).
@@ -492,3 +561,105 @@ RegisterNetEvent('matrix:server:reportRaidOutcome', function(trapHouseId, outcom
     if not trapHouseId then return end
     Matrix.Bureau.ResolveRaidOutcome(trapHouseId, outcome)
 end)
+
+-- =====================================================================
+-- MONOKROM TAKTİK DEBUG PANELİ (herkese açık test grubu, restricted=false)
+-- Gerçek oyun temposu: pattern deşifresi AnalysisIntervalSeconds'ta (300s)
+-- bir, canlı yayın hype/heat'i her GERÇEK saniyede bir (kendi 1000ms
+-- thread'i) işlenir; şafak baskını RaidDecryptionThreshold=0.90'a ulaşınca
+-- OTOMATİK tetiklenir. Bu komutlar o gerçek-zaman beklemesini atlar.
+-- =====================================================================
+local function Reply(src, msg)
+    if type(src) == 'number' and src > 0 then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[BUREAU]', msg } })
+    else
+        print(('[MATRIX:BUREAU:CONSOLE] %s'):format(msg))
+    end
+end
+
+-- /traphouseekle [label] [x] [y] [z] - Matrix.Bureau.CreateTrapHouse'u
+-- çalıştırır (async; id bir tik sonra Matrix.TrapHouses'ta görünür).
+RegisterCommand('traphouseekle', function(src, args)
+    local label = args[1]
+    local x, y, z = tonumber(args[2]), tonumber(args[3]), tonumber(args[4])
+    if not x or not y or not z then
+        Reply(src, 'Kullanim: /traphouseekle [label] [x] [y] [z]'); return
+    end
+    Matrix.Bureau.CreateTrapHouse(label, vector3(x, y, z))
+    Reply(src, 'Trap house oluşturma isteği gönderildi (async, kısa süre sonra /traphousedurum ile görünür).')
+end, false)
+
+-- /traphousedurum [id] - decryption_confidence, cyber-leak heatmap ve
+-- örüntü düzenliliğini (pattern regularity) tek satırda gösterir.
+RegisterCommand('traphousedurum', function(src, args)
+    local id = tonumber(args[1])
+    local house = id and Matrix.TrapHouses[id]
+    if not house then Reply(src, 'Kullanim: /traphousedurum [id]'); return end
+
+    Reply(src, ('#%d %s | Deşifre:%.4f/%.2f | Heat:%.3f | Düzenlilik:%.3f | Baskın:%s'):format(
+        id, house.label, house.decryption_confidence, Config.Bureau.RaidDecryptionThreshold,
+        cyberLeakHeatmap[id] or 0.0, ComputePatternRegularity(id), tostring(house.raid_ordered)))
+end, false)
+
+-- /desifreekle [id] [miktar] - AdvanceDecryption'ı doğrudan çağırır; miktar
+-- eşiği (0.90) aşarsa IssueRaid OTOMATİK olarak tetiklenir (gerçek davranış).
+RegisterCommand('desifreekle', function(src, args)
+    local id = tonumber(args[1])
+    local amount = tonumber(args[2])
+    if not id or not Matrix.TrapHouses[id] or not amount then
+        Reply(src, 'Kullanim: /desifreekle [id] [miktar, negatif de olabilir]'); return
+    end
+    Matrix.Bureau.AdvanceDecryption(id, amount)
+    Reply(src, ('Trap #%d deşifre: %.4f'):format(id, Matrix.TrapHouses[id].decryption_confidence))
+end, false)
+
+-- /propagandatetikle [id] - TriggerPropaganda'yı konsoldan test eder.
+RegisterCommand('propagandatetikle', function(src, args)
+    local id = tonumber(args[1])
+    if not id or not Matrix.TrapHouses[id] then Reply(src, 'Kullanim: /propagandatetikle [id]'); return end
+
+    local momentum, heat = Matrix.Bureau.TriggerPropaganda(id)
+    Reply(src, ('Momentum:%.3f Heat:%.3f'):format(momentum, heat))
+end, false)
+
+-- /baskinzorla [id] - IssueRaid'i decryption eşiğini BEKLEMEDEN zorla
+-- tetikler (SADECE test amaçlı: mürettebat/breach/kaçış matrisini decryption
+-- seviyesinden bağımsız olarak gözlemlemek için). Gerçek oyunda bu komut
+-- kullanılmadan baskın SADECE eşik aşıldığında otomatik olur.
+RegisterCommand('baskinzorla', function(src, args)
+    local id = tonumber(args[1])
+    if not id or not Matrix.TrapHouses[id] then Reply(src, 'Kullanim: /baskinzorla [id]'); return end
+
+    Matrix.Bureau.IssueRaid(id)
+    Reply(src, ('Trap #%d için baskın ZORLA tetiklendi (test modu).'):format(id))
+end, false)
+
+-- /baskinsonuclandir [id] [captured|escaped|eliminated] - ResolveRaidOutcome
+-- wrapper'ı; normalde client-taraflı baskın sekansının sonunda tetiklenir.
+RegisterCommand('baskinsonuclandir', function(src, args)
+    local id = tonumber(args[1])
+    local outcome = args[2]
+    if not id or not outcome then
+        Reply(src, 'Kullanim: /baskinsonuclandir [id] [captured|escaped|eliminated]'); return
+    end
+    local ok = Matrix.Bureau.ResolveRaidOutcome(id, outcome)
+    Reply(src, ok and 'Sonuç kaydedildi.' or 'Geçersiz sonuç veya aktif baskın kaydı yok.')
+end, false)
+
+-- /yayinbaslat, /yayinbitir - qb-phone'un gerçek Live event'ini tetiklemesini
+-- beklemeden canlı yayın hook'unu konsoldan test eder.
+RegisterCommand('yayinbaslat', function(src)
+    local ok = Matrix.Bureau.StartLivestream(src)
+    Reply(src, ok and 'Canlı yayın başlatıldı (test).' or 'Zaten yayında veya geçersiz src.')
+end, false)
+
+RegisterCommand('yayinbitir', function(src)
+    local ok = Matrix.Bureau.StopLivestream(src)
+    Reply(src, ok and 'Canlı yayın bitirildi (test).' or 'Aktif yayın bulunamadı.')
+end, false)
+
+-- /momentumgoster - propagandaMomentum'un (Recruit_chance eşiğini besleyen
+-- geometrik değişken) anlık değerini gösterir.
+RegisterCommand('momentumgoster', function(src)
+    Reply(src, ('Propaganda momentum: %.4f'):format(propagandaMomentum))
+end, false)

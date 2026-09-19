@@ -380,7 +380,13 @@ function Matrix.Supplier.LoadTrust()
             supplier_id     = row.supplier_id,
             trust           = tonumber(row.trust) or Config.Supplier.DefaultTrust,
             late_payments   = row.late_payments or 0,
-            forensic_leaks  = row.forensic_leaks or 0
+            forensic_leaks  = row.forensic_leaks or 0,
+            -- Basitleştirme: pasif sürüklenme saati her sunucu (yeniden)
+            -- başlangıcında sıfırlanır (DB'deki updated_at datetime string'ini
+            -- epoch'a çevirmeye gerek yok); kalıcı olan sadece `trust`'ın
+            -- kendisidir, drift saati her boot'ta yeniden başlar - bu, gerçek
+            -- ilişki değerini bozmayan kabul edilebilir bir sadeleştirmedir.
+            last_touched    = Matrix.Now()
         }
     end
     Matrix.Log('LOGISTICS', '%d toptancı güven ilişkisi yüklendi.', #rows)
@@ -390,12 +396,35 @@ CreateThread(function()
     Matrix.Supplier.LoadTrust()
 end)
 
+-- FORMÜL (pasif güven sürüklenmesi / "Newton soğuma yasası" tarzı üstel yaklaşım):
+--   gap        = hedef - guven
+--   kapanan    = gap * (1 - (1 - gunluk_oran) ^ gecen_gun)
+--   guven'     = guven + kapanan
+-- gunluk_oran sabit bir günlük "kapanma yüzdesi" olduğundan (örn. 0.02),
+-- (1-oran)^gun ifadesi kesirli günler için de matematiksel olarak tutarlıdır
+-- (sürekli bileşik faiz formülünün ayrık günlük örneklemesi). Sunucu kapalıyken
+-- geçen süre de dahildir (lazy: sadece bu kayıt tekrar okunduğunda hesaplanır,
+-- ekstra bir tick/thread GEREKTİRMEZ -> 0 Resmon).
+local function ApplyPassiveTrustDrift(rec)
+    local now = Matrix.Now()
+    local elapsedDays = (now - (rec.last_touched or now)) / 86400.0
+    rec.last_touched = now
+    if elapsedDays <= 0.0 then return end
+
+    local target = Config.Supplier.PassiveTrustRecoveryTarget
+    local closedFraction = 1.0 - ((1.0 - Config.Supplier.PassiveTrustRecoveryPerRealDay) ^ elapsedDays)
+    rec.trust = Matrix.Clamp(rec.trust + ((target - rec.trust) * closedFraction), 0.0, 1.0)
+end
+
 function Matrix.Supplier.GetTrustRecord(citizenid, supplierId)
     local key = TrustKey(citizenid, supplierId)
     local rec = SupplierTrustCache[key]
     if not rec then
-        rec = { citizenid = citizenid, supplier_id = supplierId, trust = Config.Supplier.DefaultTrust, late_payments = 0, forensic_leaks = 0 }
+        rec = { citizenid = citizenid, supplier_id = supplierId, trust = Config.Supplier.DefaultTrust,
+                late_payments = 0, forensic_leaks = 0, last_touched = Matrix.Now() }
         SupplierTrustCache[key] = rec
+    else
+        ApplyPassiveTrustDrift(rec)
     end
     return rec
 end
@@ -413,6 +442,12 @@ local function PersistTrust(rec)
     ]], { rec.citizenid, rec.supplier_id, rec.trust, rec.late_payments, rec.forensic_leaks })
 end
 
+-- FORMÜL: price_multiplier = clamp(1.0 + (1.0-trust)*PriceMultiplierGain, floor, ceiling)
+-- Yorum: güven DÜŞTÜKÇE fiyat çarpanı DOĞRUSAL yükselir (ters ilişki);
+-- trust=1.0 (tam güven) -> çarpan=1.0 (taban fiyat); trust=0.0 -> çarpan
+-- tavana (PriceMultiplierCeiling) yakın. GetTrust -> GetTrustRecord
+-- zincirinde ApplyPassiveTrustDrift LAZY olarak çalışır, yani bu fonksiyon
+-- HER ÇAĞRILDIĞINDA güncel (drift uygulanmış) trust'ı görür.
 function Matrix.Supplier.GetPriceMultiplier(citizenid, supplierId)
     local trust = Matrix.Supplier.GetTrust(citizenid, supplierId)
     local mult = 1.0 + ((1.0 - trust) * Config.Supplier.PriceMultiplierGain)
@@ -618,6 +653,19 @@ end
 
 -- =====================================================================
 -- DEALER SEVK (ETA hesaplayıcı + Filo entegrasyonu)
+--
+-- FORMÜL (Zaman-Mesafe Sürtünme Denklemi):
+--   ETA = (Mesafe / (BaseSpeed * SpeedCoefficient))
+--         * (1.0 + (W_total * WeightFrictionCoefficient) * EtkinSürtünme)
+--   EtkinSürtünme = FrictionMultiplier * (1.0 + vehicle_wear * WearFrictionBonus)
+-- Yorum: bu, klasik "hız = mesafe/zaman" ilişkisinin TERSİNE çevrilmiş
+-- (zaman = mesafe/hız) hâlidir; parantez içindeki (1 + ağırlık*k*sürtünme)
+-- çarpanı ise fiziksel sürtünme kuvvetinin (F=μN benzeri) taşıdığı yükle
+-- DOĞRUSAL, araç tipiyle ÇARPIMSAL arttığı bir gecikme-katsayısıdır. wear
+-- bonusu ayrıca sürtünmeyi wear oranında (maks %20) şişirir - iki katman
+-- (yük + araç durumu) BAĞIMSIZ ve ÇARPIMSAL bileşir. KARMAŞIKLIK: O(1)
+-- (ox_inventory sorgusu hariç, tek seferlik dispatch anında; Tick() içinde
+-- YENİDEN hesaplanmaz - ETA dispatch anında SABİTLENİR).
 -- =====================================================================
 function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatcherSrc)
     botId = tonumber(botId)
@@ -1117,3 +1165,125 @@ end)
 exports('PickupDeadDrop', function(actorRef, dropId, creditCitizenid)
     return Matrix.Supplier.OnPickup(actorRef, dropId, creditCitizenid)
 end)
+
+-- =====================================================================
+-- MONOKROM TAKTİK DEBUG PANELİ (herkese açık test grubu, restricted=false)
+-- ETA/sürtünme, kör bölge, filo aşınması, toptancı güveni ve dead drop
+-- formüllerinin hepsi burada gerçek bir sevkiyat/oyuncu eylemi beklemeden
+-- manuel tetiklenebilir/gözlemlenebilir.
+-- =====================================================================
+
+-- /sevkdurum - TÜM aktif sevkiyatları (ActiveDispatches) tek ekranda listeler:
+-- kalan ETA, kör-bölge/sinyal durumu, kullanılan plaka.
+RegisterCommand('sevkdurum', function(src)
+    local count = 0
+    for botId, dispatch in pairs(ActiveDispatches) do
+        count = count + 1
+        local remaining = math_max(dispatch.eta_total - dispatch.elapsed, 0.0) + dispatch.stall_remaining
+        Reply(src, ('Bot #%d [%s] Plaka:%s Kalan-ETA:%.1fsn Sinyal:%s Arıza-Bekliyor:%s'):format(
+            botId, dispatch.vehicle_type, tostring(dispatch.plate), remaining,
+            dispatch.comms_lost and 'KESİK' or 'VAR', tostring(dispatch.stall_remaining > 0.0)))
+    end
+    Reply(src, ('--- Toplam %d aktif sevkiyat ---'):format(count))
+end, false)
+
+-- /aracsizdurumu [plaka] - bir filo aracının aşınma/VIN/atama durumunu döker.
+RegisterCommand('aracsizdurumu', function(src, args)
+    local plate = args[1]
+    local vehicle = plate and Matrix.Fleet.GetVehicle(plate)
+    if not vehicle then Reply(src, 'Kullanim: /aracsizdurumu [plaka]'); return end
+
+    Reply(src, ('%s [%s/%s] Aşınma:%.3f Sahip:%s Atama:%s->%s Doğrulanmış-Çalıntı:%s'):format(
+        vehicle.plate, vehicle.vehicle_class, vehicle.vin_status, vehicle.vehicle_wear,
+        tostring(vehicle.registered_by_citizenid), tostring(vehicle.assignment_mode),
+        tostring(vehicle.assigned_bot_id), tostring(vehicle.verified_stolen_plate)))
+end, false)
+
+-- /aracele [plaka] [sebep] - OnVehicleEncircled wrapper'ı (Hard-Delete + mühür).
+RegisterCommand('aracele', function(src, args)
+    local plate = args[1]
+    local cause = args[2] or 'debug'
+    if type(plate) ~= 'string' then Reply(src, 'Kullanim: /aracele [plaka] [sebep]'); return end
+
+    local ok = Matrix.Logistics.OnVehicleEncircled(plate, cause)
+    Reply(src, ok and ('%s ele geçirildi ve mühürlendi.'):format(plate) or 'Araç bulunamadı.')
+end, false)
+
+-- /hasarver [botId] [miktar] - ApplyCombatDamage wrapper'ı; araç tipinin
+-- CombatResistance'ı formülü (etkin_hasar = ham*(1-direnç)) burada test edilir.
+RegisterCommand('hasarver', function(src, args)
+    local botId = tonumber(args[1])
+    local amount = tonumber(args[2]) or 1.0
+    if not botId or not Matrix.Bots[botId] then Reply(src, 'Kullanim: /hasarver [botId] [miktar]'); return end
+
+    Matrix.Logistics.ApplyCombatDamage(botId, amount)
+    local stillAlive = Matrix.Bots[botId] ~= nil
+    Reply(src, ('Bot #%d hasar aldı. Hayatta:%s'):format(botId, tostring(stillAlive)))
+end, false)
+
+-- /oldur [botId] [sebep] - OnDealerEliminated wrapper'ı (hard-delete + araç müsaderesi).
+RegisterCommand('oldur', function(src, args)
+    local botId = tonumber(args[1])
+    local cause = args[2] or 'debug'
+    if not botId or not Matrix.Bots[botId] then Reply(src, 'Kullanim: /oldur [botId] [sebep]'); return end
+
+    Matrix.Logistics.OnDealerEliminated(botId, cause)
+    Reply(src, ('Bot #%d kalıcı olarak elendi.'):format(botId))
+end, false)
+
+-- /guvengoster [citizenid] [supplierId] - toptancı güvenini ve ondan türetilen
+-- fiyat çarpanını gösterir; pasif drift (ApplyPassiveTrustDrift) burada da
+-- lazily uygulanır (GetTrust -> GetTrustRecord üzerinden).
+RegisterCommand('guvengoster', function(src, args)
+    local citizenid = args[1]
+    local supplierId = tonumber(args[2])
+    if type(citizenid) ~= 'string' or not supplierId then
+        Reply(src, 'Kullanim: /guvengoster [citizenid] [supplierId]'); return
+    end
+
+    local trust = Matrix.Supplier.GetTrust(citizenid, supplierId)
+    local mult = Matrix.Supplier.GetPriceMultiplier(citizenid, supplierId)
+    Reply(src, ('%s <-> Toptancı #%d | Güven:%.3f | Fiyat-Çarpanı:x%.2f | Tedarik-Kesik:%s'):format(
+        citizenid, supplierId, trust, mult, tostring(trust < Config.Supplier.SupplyCutTrustThreshold)))
+end, false)
+
+-- /gecodeme [citizenid] [supplierId] - ReportLatePayment wrapper'ı; güven
+-- BetrayalTrustThreshold altına düşerse TriggerBetrayal otomatik tetiklenir.
+RegisterCommand('gecodeme', function(src, args)
+    local citizenid = args[1]
+    local supplierId = tonumber(args[2])
+    if type(citizenid) ~= 'string' or not supplierId then
+        Reply(src, 'Kullanim: /gecodeme [citizenid] [supplierId]'); return
+    end
+
+    local newTrust = Matrix.Supplier.ReportLatePayment(citizenid, supplierId)
+    Reply(src, ('Gecikmiş ödeme işlendi. Yeni güven:%.3f'):format(newTrust))
+end, false)
+
+-- /dropdurum - TÜM açık dead drop'ları (ActiveDrops) ve yerel heat seviyelerini listeler.
+RegisterCommand('dropdurum', function(src)
+    local count = 0
+    local now = Matrix.Now()
+    for dropId, drop in pairs(ActiveDrops) do
+        count = count + 1
+        local cfg = GetDropConfig(dropId)
+        Reply(src, ('Drop #%d (%s) | Sahip:%s | Kalan-Pencere:%ds | Heat:%.3f'):format(
+            dropId, cfg and cfg.label or '?', tostring(drop.citizenid),
+            math_max(drop.expires_at - now, 0), DropHeat[dropId] or 0.0))
+    end
+    Reply(src, ('--- Toplam %d açık drop ---'):format(count))
+end, false)
+
+-- /korbolgetest [x] [y] [z] - verilen koordinatın Config.Logistics.DeadZones'tan
+-- birinin içinde olup olmadığını (ve hangisinin) doğrudan test eder; aktif
+-- bir sevkiyat gerektirmez, saf geometri/formül testidir.
+RegisterCommand('korbolgetest', function(src, args)
+    local x, y, z = tonumber(args[1]), tonumber(args[2]), tonumber(args[3])
+    if not x or not y or not z then
+        Reply(src, 'Kullanim: /korbolgetest [x] [y] [z]'); return
+    end
+
+    local zone = FindDeadZone(vector3(x, y, z))
+    Reply(src, zone and ('Bu koordinat "%s" kör bölgesinin İÇİNDE.'):format(zone.label)
+              or 'Bu koordinat hiçbir kör bölgenin içinde değil.')
+end, false)

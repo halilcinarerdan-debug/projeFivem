@@ -49,6 +49,14 @@ end
 
 -- =====================================================================
 -- TRAIT DERIVATION
+--
+-- FORMÜL: her trait, matrix_customer_pool'daki HAM DAVRANIŞSAL SAYAÇLARIN
+-- (police_encounters_nearby, completed_deals, times_reported, ...) sabit
+-- bir çarpanla ölçeklenip [0,1]'e clamp'lenmesidir - RNG YOK, aynı sayaç
+-- girdisi HER ZAMAN aynı trait çıktısını üretir (deterministik, tekrar
+-- edilebilir). resilience/cognitive_shifter'ın 0.30/0.20 taban değeri var
+-- (deneyimsiz bir müşteri bile sıfır değil, gerçekçi bir alt sınırdan başlar).
+-- KARMAŞIKLIK: O(1) per satır; ScanCustomerPool O(rows) ile bunu çağırır.
 -- =====================================================================
 local function DeriveTraitsFromCustomer(stats)
     if type(stats) ~= 'table' then stats = {} end
@@ -162,6 +170,20 @@ local function NextUnrevealedField(session)
     return nil
 end
 
+-- FORMÜL (karanlık mülakat panik endeksi):
+--   panic = clamp(cumulative_pressure*fear_factor - resilience*ResilienceDamping, 0, 1)
+-- Yorum: baskı ve korku ÇARPIMSAL etkileşir (yüksek fear_factor, aynı
+-- baskıyı çok daha "yıkıcı" hale getirir); resilience ise SABİT bir
+-- SÖNÜMLEME terimi olarak DOĞRUSAL çıkarılır (korkudan bağımsız bir
+-- "iç kale"). panic üç bölgeye ayrılır (RNG YOK, sabit eşikler):
+--   panic >= ConfessionThreshold(0.75) -> itiraf (gerçek trait açığa çıkar)
+--   panic >= LieThreshold(0.35)        -> yalan (deterministik SAPMA formülü
+--                                          ile üretilen SAHTE bir değer döner)
+--   panic <  LieThreshold               -> sessizlik (hiçbir bilgi çıkmaz)
+-- Yalan sapması: fakeValue = clamp(trueValue + (trueValue>=0.5 ? -0.4 : +0.4), 0,1)
+-- yani gerçek değer HANGİ YARIDAYSA (üst/alt) karşı yarıya SIÇRAR - bu,
+-- "gerçeğin tam tersini söyleme" davranışının deterministik matematik
+-- karşılığıdır. KARMAŞIKLIK: O(1) + O(|BIO_FIELDS|)=O(6) (NextUnrevealedField).
 function Matrix.Recruitment.ApplyPressure(sessionId, pressureAmount)
     sessionId = tonumber(sessionId)
     if not sessionId then return nil end
@@ -340,4 +362,83 @@ RegisterCommand('sorgu', function(src, args)
     if result then
         Reply(src, ('Sorgu #%d | Panik: %s | Sonuç: %s'):format(sid, result.waveform, result.outcome))
     end
+end, false)
+
+-- =====================================================================
+-- MONOKROM TAKTİK DEBUG PANELİ (herkese açık test grubu, restricted=false)
+-- ScanCustomerPool normalde Bureau.AnalysisIntervalSeconds'ta (300s) bir,
+-- kendi coroutine'inde (main.lua ticker'ını bloklamadan) çalışır. Bu
+-- komutlar o beklemeyi atlayıp DeriveTraitsFromCustomer/panic formüllerini
+-- anlık test etmeyi sağlar.
+-- =====================================================================
+
+-- /musterikaydet [citizenid] [isim] [polisEncounter] [tamamlananIs] [ihbar]
+-- [odemeBasarisiz] [kimyaIpucu] [bagimlilik] - matrix_customer_pool'a
+-- gerçek oynanış beklemeden bir satır yazar; ardından /havuztara ile
+-- DeriveTraitsFromCustomer formülünün ürettiği trait'ler gözlemlenebilir.
+RegisterCommand('musterikaydet', function(src, args)
+    local citizenid = args[1]
+    local name       = args[2] or citizenid
+    if type(citizenid) ~= 'string' then
+        Reply(src, 'Kullanim: /musterikaydet [citizenid] [isim] [polisEncounter] [tamamlananIs] [ihbar] [odemeBasarisiz] [kimyaIpucu] [bagimlilik]')
+        return
+    end
+
+    MySQL.prepare([[
+        INSERT INTO matrix_customer_pool (
+            citizenid, name, police_encounters_nearby, completed_deals, times_reported,
+            failed_payments, chemistry_hints, addiction_level, promoted_to_candidate, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NOW())
+        ON DUPLICATE KEY UPDATE
+            name = VALUES(name), police_encounters_nearby = VALUES(police_encounters_nearby),
+            completed_deals = VALUES(completed_deals), times_reported = VALUES(times_reported),
+            failed_payments = VALUES(failed_payments), chemistry_hints = VALUES(chemistry_hints),
+            addiction_level = VALUES(addiction_level)
+    ]], {
+        citizenid, name,
+        tonumber(args[3]) or 0, tonumber(args[4]) or 0, tonumber(args[5]) or 0,
+        tonumber(args[6]) or 0, tonumber(args[7]) or 0, tonumber(args[8]) or 0.0
+    })
+
+    Reply(src, ('Müşteri havuzu satırı yazıldı: %s (%s)'):format(citizenid, name))
+end, false)
+
+-- /havuztara - ScanCustomerPool'u 300sn beklemeden anlık çalıştırır.
+RegisterCommand('havuztara', function(src)
+    local count = Matrix.Recruitment.ScanCustomerPool()
+    Reply(src, ('Havuz tarandı: %d aday terfi etti.'):format(count or 0))
+end, false)
+
+-- /adaygoster [candidateId] - bir adayın anlık psychology/addiction durumunu döker.
+RegisterCommand('adaygoster', function(src, args)
+    local id = tonumber(args[1])
+    local candidate = id and Matrix.Candidates[id]
+    if not candidate then Reply(src, 'Kullanim: /adaygoster [candidateId]'); return end
+
+    local p = candidate.psychology
+    Reply(src, ('Aday #%d %s | Fear:%.2f Res:%.2f Snitch:%.2f Econ:%.2f Cog:%.2f Chem:%.2f | Bağımlılık:%.1f'):format(
+        id, candidate.name, p.fear_factor, p.resilience, p.snitch_tendency, p.economic_pressure,
+        p.cognitive_shifter, p.skill_chemistry, candidate.addiction_level))
+end, false)
+
+-- /baskiuygula [sessionId] [miktar] - ApplyPressure'ı /sorgu'nun sabit 25.0
+-- değeri dışında serbest bir miktarla test etmek için.
+RegisterCommand('baskiuygula', function(src, args)
+    local sid = tonumber(args[1])
+    local amount = tonumber(args[2])
+    if not sid or not amount then Reply(src, 'Kullanim: /baskiuygula [sessionId] [miktar]'); return end
+
+    local result = Matrix.Recruitment.ApplyPressure(sid, amount)
+    if not result then Reply(src, 'Sorgu bulunamadı.'); return end
+
+    Reply(src, ('Panik: %s (%.3f) | Sonuç: %s'):format(result.waveform, result.panic_index, result.outcome))
+end, false)
+
+-- /sorgubitir [sessionId] - EvaluateOutcome wrapper'ı.
+RegisterCommand('sorgubitir', function(src, args)
+    local sid = tonumber(args[1])
+    if not sid then Reply(src, 'Kullanim: /sorgubitir [sessionId]'); return end
+
+    local outcome = Matrix.Recruitment.EvaluateOutcome(sid)
+    Reply(src, outcome and ('Sonuç: %s'):format(outcome) or 'Sorgu bulunamadı.')
 end, false)

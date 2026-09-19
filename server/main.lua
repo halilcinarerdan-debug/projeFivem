@@ -738,3 +738,84 @@ exports('ScanCustomerPool',       function() return Matrix.Recruitment.ScanCusto
 exports('BeginInterrogation',     function(c, s) return Matrix.Recruitment.BeginInterrogation(c, s) end)
 exports('ApplyInterrogationPressure', function(s, a) return Matrix.Recruitment.ApplyPressure(s, a) end)
 exports('EvaluateInterrogation',  function(s) return Matrix.Recruitment.EvaluateOutcome(s) end)
+
+-- =====================================================================
+-- MONOKROM TAKTİK DEBUG PANELİ (herkese açık test grubu, restricted=false)
+-- Bu komutlar hiçbir formülü DEĞİŞTİRMEZ; sadece Matrix.Bots/PlayerState
+-- üzerindeki alanları doğrudan okuyup/yazarak gerçek oyun döngüsünü
+-- beklemeden (60dk fatigue penceresi, 1000ms ticker vb.) diferansiyel
+-- denklemleri manuel tetiklemeyi/gözlemlemeyi sağlar. RNG yok; her komut
+-- deterministik bir okuma veya doğrudan atamadır.
+-- =====================================================================
+local VALID_PSYCHOLOGY_FIELDS = {
+    fear_factor = true, resilience = true, snitch_tendency = true,
+    economic_pressure = true, cognitive_shifter = true,
+    skill_chemistry = true, skill_cyber = true, skill_logistics = true
+}
+local VALID_BIOLOGY_FIELDS = {
+    fatigue_level = true, cortisol_level = true, withdrawal_index = true,
+    addiction_level = true, base_cortisol_recovery_rate = true
+}
+
+-- /botskill [id] [alan] [deger] - psychology tablosundaki herhangi bir
+-- skill/trait alanını (0.0-1.0 aralığına clamp'lenir) DOĞRUDAN yazar.
+-- Kullanım: nöral erozyon / withdrawal skill penaltısı eşiklerini (bkz.
+-- Config.Kitchen.WithdrawalSkillPenaltyThreshold) anında test etmek için.
+RegisterCommand('botskill', function(src, args)
+    local botId = tonumber(args[1])
+    local field = args[2]
+    local value = tonumber(args[3])
+    local bot = botId and Matrix.Bots[botId]
+    if not bot or not VALID_PSYCHOLOGY_FIELDS[field] or not value then
+        Reply(src, 'Kullanim: /botskill [id] [fear_factor|resilience|snitch_tendency|economic_pressure|cognitive_shifter|skill_chemistry|skill_cyber|skill_logistics] [0.0-1.0]')
+        return
+    end
+    bot.psychology[field] = Matrix.Clamp(value, 0.0, 1.0)
+    Matrix.MarkBotDirty(botId)
+    Reply(src, ('Bot #%d %s = %.3f olarak ayarlandı.'):format(botId, field, bot.psychology[field]))
+end, false)
+
+-- /botbio [id] [alan] [deger] - biology tablosundaki bir alanı doğrudan
+-- yazar. addiction_level 0-100 aralığına, diğerleri 0.0-1.0'a clamp'lenir.
+-- Kullanım: FatigueCriticalDurationSeconds (60dk) beklemeden burnout/
+-- withdrawal eşiklerini anında tetiklemek.
+RegisterCommand('botbio', function(src, args)
+    local botId = tonumber(args[1])
+    local field = args[2]
+    local value = tonumber(args[3])
+    local bot = botId and Matrix.Bots[botId]
+    if not bot or not VALID_BIOLOGY_FIELDS[field] or not value then
+        Reply(src, 'Kullanim: /botbio [id] [fatigue_level|cortisol_level|withdrawal_index|addiction_level|base_cortisol_recovery_rate] [deger]')
+        return
+    end
+    local maxV = (field == 'addiction_level') and 100.0 or 1.0
+    bot.biology[field] = Matrix.Clamp(value, 0.0, maxV)
+    Matrix.MarkBotDirty(botId)
+    Reply(src, ('Bot #%d %s = %.3f olarak ayarlandı.'):format(botId, field, bot.biology[field]))
+end, false)
+
+-- /radyoparazit [src] [yogunluk] - Matrix.Radio.ApplyStatic'i doğrudan
+-- tetikler (normalde dead-zone girişi veya kortizol>0.8 panik eşiğiyle
+-- otomatik tetiklenir). pma-voice/qb-radio kurulu değilse bile hata vermez.
+RegisterCommand('radyoparazit', function(src, args)
+    local targetSrc = tonumber(args[1]) or src
+    local intensity = tonumber(args[2]) or 1.0
+    Matrix.Radio.ApplyStatic(targetSrc, intensity, 'debug')
+    Reply(src, ('Telsiz statiği src=%d yoğunluk=%.2f olarak tetiklendi.'):format(targetSrc, intensity))
+end, false)
+
+-- /matrixdump - bellekteki TÜM botların kompakt, monokrom bir özetini basar.
+-- Diferansiyel denklemlerin (fatigue/cortisol/withdrawal/skills) tüm bot
+-- popülasyonu üzerindeki anlık etkisini tek ekranda gözlemlemek içindir.
+RegisterCommand('matrixdump', function(src)
+    local count = 0
+    for id, bot in pairs(Matrix.Bots) do
+        count = count + 1
+        Reply(src, ('#%d [%s|%s|%s] Fat:%.2f Cort:%.2f With:%.2f | Chem:%.2f Cyber:%.2f Log:%.2f | Res:%.2f Snitch:%.2f'):format(
+            id, bot.name, bot.role, bot.status,
+            bot.biology.fatigue_level, bot.biology.cortisol_level, bot.biology.withdrawal_index,
+            bot.psychology.skill_chemistry, bot.psychology.skill_cyber, bot.psychology.skill_logistics,
+            bot.psychology.resilience, bot.psychology.snitch_tendency))
+    end
+    Reply(src, ('--- Toplam %d bot ---'):format(count))
+end, false)
