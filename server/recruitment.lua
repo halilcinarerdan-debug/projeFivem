@@ -9,7 +9,7 @@ Matrix.Sessions    = Matrix.Sessions    or {}
 
 local pairs, ipairs, type, tostring = pairs, ipairs, type, tostring
 local tonumber, table               = tonumber, table
-local math_max                      = math.max
+local math_max, math_floor          = math.max, math.floor
 
 local nextCandidateId = 1
 local nextSessionId   = 1
@@ -18,6 +18,34 @@ local BIO_FIELDS = {
     'fear_factor', 'resilience', 'snitch_tendency',
     'economic_pressure', 'cognitive_shifter', 'skill_chemistry'
 }
+
+-- =====================================================================
+-- ASCII SES DALGASI (karanlık mülakat terminali)
+-- =====================================================================
+local function BuildAsciiWaveform(intensity)
+    intensity = Matrix.Clamp(tonumber(intensity) or 0.0, 0.0, 1.0)
+    local width = Config.Recruitment.WaveformWidth
+    local filled = math_floor((intensity * width) + 0.5)
+    return '[' .. ('|'):rep(filled) .. ('.'):rep(width - filled) .. ']'
+end
+
+-- =====================================================================
+-- SORGU ÖZNESİ ÇÖZÜMLEMESİ: /sorgu hem havuzdan çekilmiş bir adayı (candidate)
+-- hem de zaten işe alınmış bir botu (örn. yakalanma sonrası sadakat testi)
+-- interrogate edebilsin diye tekilleştirilmiş bir görünüm sağlar. İkisi de
+-- aynı psychology şemasını (fear_factor/resilience/...) paylaşır.
+-- =====================================================================
+local function ResolveInterrogationSubject(kind, id)
+    if kind == 'bot' then
+        local bot = Matrix.Bots[id]
+        if not bot then return nil end
+        return { kind = 'bot', id = id, name = bot.name, psychology = bot.psychology, ref_key = bot.dna_id }
+    end
+
+    local candidate = Matrix.Candidates[id]
+    if not candidate then return nil end
+    return { kind = 'candidate', id = id, name = candidate.name, psychology = candidate.psychology, ref_key = candidate.citizenid }
+end
 
 -- =====================================================================
 -- TRAIT DERIVATION
@@ -54,6 +82,13 @@ function Matrix.Recruitment.ScanCustomerPool()
         local traits = DeriveTraitsFromCustomer(row)
         local score  = traits.resilience + traits.cognitive_shifter + (1.0 - traits.snitch_tendency)
 
+        -- Sokak Kulakları: siber yoğunluk (momentum) yükseldiğinde, ihbar
+        -- geçmişi olan müşteriler potansiyel köstebek olarak fısıldanır.
+        if momentum > Config.Recruitment.StreetWhisperMomentumThreshold and (row.times_reported or 0) > 0 then
+            Matrix.Log('RECRUITMENT', '[SOKAK KULAKLARI] "%s" hakkında fısıltılar var: %d kez ihbar geçmiş.',
+                row.name or row.citizenid, row.times_reported)
+        end
+
         if score >= threshold then
             local cid = nextCandidateId
             nextCandidateId = cid + 1
@@ -88,18 +123,27 @@ end
 -- =====================================================================
 -- INTERROGATION
 -- =====================================================================
-function Matrix.Recruitment.BeginInterrogation(candidateId, interrogatorSource)
-    candidateId = tonumber(candidateId)
-    if not candidateId then return nil end
-    local candidate = Matrix.Candidates[candidateId]
-    if not candidate then return nil end
+-- subjectRef: eski davranışla uyumlu düz bir candidateId (number) OLABİLİR,
+-- ya da { kind = 'candidate'|'bot', id = ... } şeklinde açık bir referans.
+function Matrix.Recruitment.BeginInterrogation(subjectRef, interrogatorSource)
+    local kind, id
+    if type(subjectRef) == 'table' then
+        kind, id = subjectRef.kind, tonumber(subjectRef.id)
+    else
+        kind, id = 'candidate', tonumber(subjectRef)
+    end
+    if not id then return nil end
+
+    local subject = ResolveInterrogationSubject(kind, id)
+    if not subject then return nil end
 
     local sid = nextSessionId
     nextSessionId = sid + 1
 
     Matrix.Sessions[sid] = {
         id                  = sid,
-        candidate_id        = candidateId,
+        subject_kind        = subject.kind,
+        subject_id          = subject.id,
         interrogator_source = interrogatorSource,
         cumulative_pressure = 0.0,
         lies_told           = 0,
@@ -107,7 +151,7 @@ function Matrix.Recruitment.BeginInterrogation(candidateId, interrogatorSource)
         revealed            = {}
     }
 
-    Matrix.Log('RECRUITMENT', 'Sorgu #%d başlatıldı -> Aday #%d (%s)', sid, candidateId, candidate.name)
+    Matrix.Log('RECRUITMENT', 'Sorgu #%d başlatıldı -> %s #%s (%s)', sid, subject.kind, tostring(subject.id), subject.name)
     return sid
 end
 
@@ -124,8 +168,9 @@ function Matrix.Recruitment.ApplyPressure(sessionId, pressureAmount)
     local session = Matrix.Sessions[sessionId]
     if not session then return nil end
 
-    local candidate = Matrix.Candidates[session.candidate_id]
-    if not candidate then return nil end
+    local subject = ResolveInterrogationSubject(session.subject_kind, session.subject_id)
+    if not subject then return nil end
+    local psychology = subject.psychology
 
     pressureAmount = tonumber(pressureAmount) or 0.0
     if pressureAmount ~= pressureAmount or pressureAmount < 0.0 then pressureAmount = 0.0 end
@@ -134,31 +179,40 @@ function Matrix.Recruitment.ApplyPressure(sessionId, pressureAmount)
     session.cumulative_pressure = session.cumulative_pressure + pressureAmount
 
     local panic = Matrix.Clamp(
-        (session.cumulative_pressure * candidate.psychology.fear_factor)
-            - (candidate.psychology.resilience * Config.Recruitment.ResilienceDamping),
+        (session.cumulative_pressure * psychology.fear_factor)
+            - (psychology.resilience * Config.Recruitment.ResilienceDamping),
         0.0, 1.0
     )
+    local waveform = BuildAsciiWaveform(panic)
 
     local field = NextUnrevealedField(session)
     if not field then
-        return { panic_index = panic, outcome = 'exhausted' }
+        Matrix.Log('RECRUITMENT', 'Sorgu #%d tükendi. Panik: %s', sessionId, waveform)
+        return { panic_index = panic, outcome = 'exhausted', waveform = waveform }
     end
 
     if panic >= Config.Recruitment.ConfessionThreshold then
-        session.revealed[field] = candidate.psychology[field]
+        session.revealed[field] = psychology[field]
         session.confessions = session.confessions + 1
-        Matrix.Log('RECRUITMENT', '[İTİRAF] Sorgu #%d -> %s = %.2f',
-            sessionId, field, candidate.psychology[field])
-        return { panic_index = panic, outcome = 'confession', field = field, value = candidate.psychology[field] }
+        Matrix.Log('RECRUITMENT', '[İTİRAF] Sorgu #%d -> %s = %.2f | Panik: %s',
+            sessionId, field, psychology[field], waveform)
+        return { panic_index = panic, outcome = 'confession', field = field, value = psychology[field], waveform = waveform }
     elseif panic >= Config.Recruitment.LieThreshold then
-        local trueValue = candidate.psychology[field]
+        local trueValue = psychology[field]
         local fakeValue = Matrix.Clamp(trueValue + ((trueValue >= 0.5) and -0.4 or 0.4), 0.0, 1.0)
         session.lies_told = session.lies_told + 1
-        Matrix.Log('RECRUITMENT', '[YALAN TESPİTİ] Sorgu #%d -> %s alanında sapma tespit edildi.', sessionId, field)
-        return { panic_index = panic, outcome = 'lie', field = field, value = fakeValue }
+
+        -- Yalan söylerken telsiz ses frekans sapması: lies_told'a bağlı
+        -- deterministik bozulma (RNG yok) - panikten daha "kısık/parazitli".
+        local deviation = Matrix.Clamp(panic - (Config.Recruitment.LieWaveformDeviationPerLie * session.lies_told), 0.0, 1.0)
+        local deviationWave = BuildAsciiWaveform(deviation)
+
+        Matrix.Log('RECRUITMENT', '[YALAN TESPİTİ] Sorgu #%d -> %s alanında sapma tespit edildi.\n  SES  : %s\n  SAPMA: %s',
+            sessionId, field, waveform, deviationWave)
+        return { panic_index = panic, outcome = 'lie', field = field, value = fakeValue, waveform = waveform, deviation_waveform = deviationWave }
     else
-        Matrix.Log('RECRUITMENT', '[SESSİZLİK] Sorgu #%d -> Aday baskıya direniyor (%.2f)', sessionId, panic)
-        return { panic_index = panic, outcome = 'silence' }
+        Matrix.Log('RECRUITMENT', '[SESSİZLİK] Sorgu #%d -> Aday baskıya direniyor. Panik: %s', sessionId, waveform)
+        return { panic_index = panic, outcome = 'silence', waveform = waveform }
     end
 end
 
@@ -191,38 +245,43 @@ function Matrix.Recruitment.EvaluateOutcome(sessionId)
     local session = Matrix.Sessions[sessionId]
     if not session then return nil end
 
-    local candidate = Matrix.Candidates[session.candidate_id]
-    if not candidate then return nil end
+    local subject = ResolveInterrogationSubject(session.subject_kind, session.subject_id)
+    if not subject then return nil end
+    local psychology = subject.psychology
 
     local outcome
     if session.lies_told > Config.Recruitment.MaxToleratedLies then
         outcome = 'burned'
     elseif session.confessions >= Config.Recruitment.MinConfessionsToPromote
-        and candidate.psychology.snitch_tendency <= Config.Recruitment.SafeSnitchTendencyCeiling
-        and candidate.psychology.resilience >= Config.Recruitment.MinOperationalResilience then
-        outcome = 'recruited'
+        and psychology.snitch_tendency <= Config.Recruitment.SafeSnitchTendencyCeiling
+        and psychology.resilience >= Config.Recruitment.MinOperationalResilience then
+        -- Zaten bot olan bir özne için "recruited" anlamsız: sadakat testi geçti demektir.
+        outcome = (subject.kind == 'candidate') and 'recruited' or 'released'
     else
         outcome = 'released'
     end
 
-    -- Async insert: sunucuyu bloklamaz
+    -- Async insert: sunucuyu bloklamaz. Özne bir bot ise ref_key onun dna_id'sidir
+    -- (candidate_citizenid kolonu her iki özne türü için de kimlik alanı olarak kullanılır).
     MySQL.prepare([[
         INSERT INTO matrix_recruitment_sessions (
             candidate_citizenid, fear_factor, resilience, lies_told, confessions, outcome, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, NOW())
     ]], {
-        candidate.citizenid, candidate.psychology.fear_factor, candidate.psychology.resilience,
+        subject.ref_key, psychology.fear_factor, psychology.resilience,
         session.lies_told, session.confessions, outcome
     })
 
-    if outcome == 'recruited' then
-        Matrix.Recruitment.Promote(candidate)
+    if outcome == 'recruited' and subject.kind == 'candidate' then
+        Matrix.Recruitment.Promote(Matrix.Candidates[subject.id])
     end
 
-    Matrix.Candidates[session.candidate_id] = nil
+    if subject.kind == 'candidate' then
+        Matrix.Candidates[subject.id] = nil
+    end
     Matrix.Sessions[sessionId] = nil
 
-    Matrix.Log('RECRUITMENT', 'Sorgu #%d sonuçlandı: %s', sessionId, outcome)
+    Matrix.Log('RECRUITMENT', 'Sorgu #%d (%s #%s) sonuçlandı: %s', sessionId, subject.kind, tostring(subject.id), outcome)
     return outcome
 end
 
@@ -252,3 +311,33 @@ RegisterNetEvent('matrix:server:evaluateInterrogation', function(sessionId)
     if not sessionId then return end
     Matrix.Recruitment.EvaluateOutcome(sessionId)
 end)
+
+-- =====================================================================
+-- KOMUT: /sorgu [id] [aday|bot] - ASCII ses-dalgalı karanlık mülakat terminali
+-- =====================================================================
+local function Reply(src, msg)
+    if type(src) == 'number' and src > 0 then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[SORGU]', msg } })
+    else
+        print(('[MATRIX:RECRUITMENT:CONSOLE] %s'):format(msg))
+    end
+end
+
+RegisterCommand('sorgu', function(src, args)
+    local id = tonumber(args[1])
+    local kind = (args[2] == 'bot') and 'bot' or 'candidate'
+
+    if not id then
+        Reply(src, 'Kullanim: /sorgu [id] [aday|bot]'); return
+    end
+
+    local sid = Matrix.Recruitment.BeginInterrogation({ kind = kind, id = id }, src)
+    if not sid then
+        Reply(src, ('%s #%d bulunamadı.'):format(kind, id)); return
+    end
+
+    local result = Matrix.Recruitment.ApplyPressure(sid, 25.0)
+    if result then
+        Reply(src, ('Sorgu #%d | Panik: %s | Sonuç: %s'):format(sid, result.waveform, result.outcome))
+    end
+end, false)

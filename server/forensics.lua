@@ -180,7 +180,38 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
     }
 end
 
-function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryId, casingSlot)
+-- =====================================================================
+-- ADLİ KRİMİNAL RAPORU (ASCII, askeri evrak formatı) - ox_inventory
+-- item.metadata.description alanına basılır, tooltip'te gösterilir.
+-- =====================================================================
+local REPORT_WIDTH = 36
+local REPORT_BORDER = ('='):rep(REPORT_WIDTH)
+local REPORT_DIVIDER = ('-'):rep(REPORT_WIDTH)
+
+local function ReportLine(label, value)
+    return ('%-13s: %s'):format(label, tostring(value))
+end
+
+function Matrix.Forensics.BuildForensicReport(data)
+    local lines = {
+        REPORT_BORDER,
+        '     ADLI KRIMINAL RAPORU',
+        REPORT_DIVIDER,
+        ReportLine('BALISTIK ID', data.ballistic_id or 'BILINMIYOR'),
+        ReportLine('KANIT TIPI', data.evidence_type or 'casing'),
+        ReportLine('STRIASYON', ('%.3f'):format(data.striation_quality or 0.0)),
+        ReportLine('PARMAK IZI', data.fingerprint_id or 'BILINMIYOR'),
+        ReportLine('IZ NETLIGI', ('%.3f'):format(data.fingerprint_quality or 0.0)),
+        ReportLine('ESLESME', ('%.3f'):format(data.match_certainty or 0.0)),
+        ReportLine('MUHUR', data.sealed and 'MUHURLENDI' or 'MUHURLENMEDI'),
+        REPORT_DIVIDER,
+        ReportLine('KAYIT', os.date('%Y-%m-%d %H:%M:%S')),
+        REPORT_BORDER
+    }
+    return table.concat(lines, '\n')
+end
+
+function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
     if not casingInventoryId or type(casingSlot) ~= 'number' then return nil end
 
     local casingMeta = Matrix.Inventory.GetSlotMetadata(casingInventoryId, casingSlot)
@@ -191,12 +222,40 @@ function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryI
     local result = Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, 'casing')
     if not result then return nil end
 
+    local report = Matrix.Forensics.BuildForensicReport({
+        ballistic_id        = result.ballistic_id,
+        evidence_type        = 'casing',
+        striation_quality    = result.striation_quality,
+        fingerprint_id        = result.dna_id,
+        fingerprint_quality  = result.fingerprint_quality,
+        match_certainty      = result.match_certainty,
+        sealed                = result.sealed
+    })
+
     Matrix.Inventory.MergeMetadata(casingInventoryId, casingSlot, {
         ballistic_id       = result.ballistic_id,
         striation_quality  = result.striation_quality,
         fingerprint_id     = result.dna_id,
-        fingerprint_quality= result.fingerprint_quality
+        fingerprint_quality= result.fingerprint_quality,
+        description        = report
     })
+
+    -- Silahın kendisi de (kovan değil) incelendiğinde aynı adli özet görünsün.
+    if weaponInventoryId and type(weaponSlot) == 'number' then
+        Matrix.Inventory.MergeMetadata(weaponInventoryId, weaponSlot, {
+            ballistic_id = result.ballistic_id,
+            weapon_wear  = result.weapon_wear,
+            description  = Matrix.Forensics.BuildForensicReport({
+                ballistic_id     = result.ballistic_id,
+                evidence_type     = 'weapon',
+                striation_quality = result.striation_quality,
+                fingerprint_id     = result.dna_id,
+                fingerprint_quality = result.fingerprint_quality,
+                match_certainty   = result.match_certainty,
+                sealed             = result.sealed
+            })
+        })
+    end
 
     return result.evidence_id, result.match_certainty, result.sealed
 end
@@ -276,12 +335,14 @@ end)
 -- =====================================================================
 -- EVENT BRIDGE (guard'lı)
 -- =====================================================================
-RegisterNetEvent('matrix:server:reportWeaponDischarge', function(weaponSerial, casingInventoryId, casingSlot)
+RegisterNetEvent('matrix:server:reportWeaponDischarge', function(weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
     local src = source
     if type(src) ~= 'number' or src <= 0 then return end
     if type(weaponSerial) ~= 'string' or #weaponSerial == 0 or #weaponSerial > 64 then return end
     if type(casingInventoryId) ~= 'string' or type(casingSlot) ~= 'number' then return end
-    Matrix.Forensics.OnWeaponFired({ kind = 'player', source = src }, weaponSerial, casingInventoryId, casingSlot)
+    if weaponInventoryId ~= nil and type(weaponInventoryId) ~= 'string' then weaponInventoryId = nil end
+    if type(weaponSlot) ~= 'number' then weaponSlot = nil end
+    Matrix.Forensics.OnWeaponFired({ kind = 'player', source = src }, weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
 end)
 
 RegisterNetEvent('matrix:server:reportObjectTouch', function(inventoryId, slot)

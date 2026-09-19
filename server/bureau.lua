@@ -11,8 +11,11 @@ local type, tostring, tonumber   = type, tostring, tonumber
 local math, table                = math, table
 local math_max, math_min         = math.max, math.min
 local math_huge                  = math.huge
+local math_floor                 = math.floor
 local os_date                    = os.date
 local os_time                    = os.time
+local GetPlayerPed                = GetPlayerPed
+local GetEntityCoords             = GetEntityCoords
 
 local propagandaMomentum = 0.0
 local cyberLeakHeatmap   = {}  -- [trapHouseId] = intensity
@@ -21,6 +24,10 @@ local patternLog         = {}  -- [trapHouseId][bucketKey] = count
 -- Dirty sets
 local dirtyDecryption = {}
 local dirtyIntel      = {}
+
+-- Raid & canlı yayın çalışma zamanı durumları (kalıcı değil, tek oturumluk)
+local RaidLogIdByTrapHouse = {} -- trapHouseId -> matrix_raid_log.id
+local LivestreamSessions   = {} -- src -> { started, citizenid, hype, heat_added, trap_house_id }
 
 -- =====================================================================
 -- UTILITIES
@@ -251,12 +258,39 @@ function Matrix.Bureau.Tick()
 end
 
 -- =====================================================================
--- RAID
+-- RAID (fiziksel Şafak Baskını: deterministik mürettebat/breach/kaçış matrisi)
 -- =====================================================================
+
+-- Mürettebat büyüklüğü siber yoğunluğa (heat) bağlı, tavanlı; breach yöntemi
+-- deşifre kesinliğine bağlı (>= eşik: explosive, altı: ram); kaçış penceresi
+-- trap house bir telekom kör noktasına yakınsa (Büro telsizi de bozulur) uzar.
+-- Hepsi deterministik config sabitlerinden gelir, RNG yok.
+local function ComputeRaidSquad(trapHouseId, house)
+    local heat = cyberLeakHeatmap[trapHouseId] or 0.0
+    local squadSize = math_floor(Config.Bureau.RaidBaseSquadSize + (heat * Config.Bureau.RaidHeatSquadFactor) + 0.5)
+    squadSize = math_max(Config.Bureau.RaidBaseSquadSize, math_min(squadSize, Config.Bureau.RaidMaxSquadSize))
+
+    local breachMethod = (house.decryption_confidence >= Config.Bureau.RaidExplosiveBreachThreshold)
+        and 'explosive' or 'ram'
+
+    local escapeWindow = Config.Bureau.RaidBaseEscapeWindowSeconds
+    for _, zone in ipairs(Config.Logistics.DeadZones) do
+        if VectorDistance(house.coords, zone.coords) <= zone.radius then
+            escapeWindow = escapeWindow + Config.Bureau.RaidDeadZoneEscapeBonusSeconds
+            break
+        end
+    end
+
+    return squadSize, breachMethod, escapeWindow
+end
+
 function Matrix.Bureau.IssueRaid(trapHouseId)
     local house = Matrix.TrapHouses[trapHouseId]
     if not house then return end
     if house.raid_ordered then return end
+
+    local decryptionAtRaid = house.decryption_confidence
+    local squadSize, breachMethod, escapeWindow = ComputeRaidSquad(trapHouseId, house)
 
     house.raid_ordered          = true
     house.decryption_confidence = Config.Bureau.PostRaidDecryptionReset
@@ -274,8 +308,38 @@ function Matrix.Bureau.IssueRaid(trapHouseId)
         trapHouseId
     })
 
-    TriggerClientEvent('matrix:client:executeRaid', -1, trapHouseId, house.coords)
-    Matrix.Log('BUREAU', '[ŞAFAK BASKINI] Trap house #%d (%s) emri üretildi.', trapHouseId, house.label)
+    MySQL.insert([[
+        INSERT INTO matrix_raid_log (
+            trap_house_id, squad_size, breach_method, decryption_confidence_at_raid,
+            escape_window_seconds, outcome, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', NOW())
+    ]], { trapHouseId, squadSize, breachMethod, decryptionAtRaid, escapeWindow },
+    function(insertId)
+        if insertId then RaidLogIdByTrapHouse[trapHouseId] = insertId end
+    end)
+
+    -- Fiziksel kapı kırma/enjeksiyon animasyonu client-taraflıdır (bu repo'da
+    -- client.lua yok); burada sadece deterministik karar kontratı iletilir.
+    TriggerClientEvent('matrix:client:executeRaid', -1, trapHouseId, house.coords, {
+        squad_size    = squadSize,
+        breach_method = breachMethod,
+        escape_window = escapeWindow
+    })
+
+    Matrix.Log('BUREAU', '[ŞAFAK BASKINI] Trap house #%d (%s) emri üretildi: %d birim, breach=%s, kaçış penceresi=%ds.',
+        trapHouseId, house.label, squadSize, breachMethod, escapeWindow)
+end
+
+local VALID_RAID_OUTCOMES = { captured = true, escaped = true, eliminated = true }
+
+function Matrix.Bureau.ResolveRaidOutcome(trapHouseId, outcome)
+    if not VALID_RAID_OUTCOMES[outcome] then return false end
+    local logId = RaidLogIdByTrapHouse[trapHouseId]
+    if not logId then return false end
+
+    MySQL.prepare('UPDATE matrix_raid_log SET outcome = ?, resolved_at = NOW() WHERE id = ?', { outcome, logId })
+    Matrix.Log('BUREAU', 'Baskın (kayıt #%d, trap #%d) sonuçlandı: %s', logId, trapHouseId, outcome)
+    return true
 end
 
 function Matrix.Bureau.ReceiveSnitchLeak(trapHouseId)
@@ -303,6 +367,99 @@ CreateThread(function()
 end)
 
 -- =====================================================================
+-- QB-PHONE CANLI YAYIN KANCASI & SİBER PROPAGANDA
+-- qb-phone fork'ları event adlarını farklı isimlendirebilir; bu yüzden bu
+-- dosya kendi sabit event adını kullanır ('matrix:server:reportLivestream*')
+-- ve qb-phone tarafında bu event'i tetikleyen tek satırlık bir köprü
+-- eklenmesi gerekir (qb-phone'un kendi Live/livestream event handler'ından
+-- TriggerServerEvent('matrix:server:reportLivestreamStart') çağrılır).
+-- =====================================================================
+RegisterNetEvent('matrix:server:reportLivestreamStart', function()
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if LivestreamSessions[src] then return end
+
+    local state = Matrix.GetOrCreatePlayerState(src)
+    LivestreamSessions[src] = {
+        started    = Matrix.Now(),
+        citizenid  = state and state.citizenid,
+        hype       = 1.0,
+        heat_added = 0.0,
+        trap_house_id = nil
+    }
+    Matrix.Log('BUREAU', '[CANLI YAYIN BAŞLADI] src=%d, IP çıkışı Büro siber taramasına açıldı.', src)
+end)
+
+RegisterNetEvent('matrix:server:reportLivestreamStop', function()
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    local session = LivestreamSessions[src]
+    if not session then return end
+    LivestreamSessions[src] = nil
+
+    local duration = Matrix.Now() - session.started
+    MySQL.prepare([[
+        INSERT INTO matrix_livestream_events (citizenid, duration_seconds, hype_multiplier, heat_added, trap_house_id, created_at)
+        VALUES (?, ?, ?, ?, ?, NOW())
+    ]], { session.citizenid, duration, session.hype, session.heat_added, session.trap_house_id })
+
+    Matrix.Log('BUREAU', '[CANLI YAYIN BİTTİ] src=%d, süre=%ds, son hype=%.2f, eklenen heat=%.2f',
+        src, duration, session.hype, session.heat_added)
+end)
+
+-- Hype tick'i (1000ms, kendi bağımsız thread'i — master ticker'ı kirletmez).
+-- İtibar Çarpanı (R_hype) geometrik büyür ve doğrudan propagandaMomentum'u da
+-- besler (Recruit_chance zaten momentum'a bağlı, ayrı bir kanal icat edilmedi).
+-- Bedel: en yakın trap house'un cyber-leak heatmap'i botun skill_cyber'iyle
+-- çarpılarak yükselir ve Şafak Baskını sayacı (deşifre kazancı) öne çekilir.
+CreateThread(function()
+    while true do
+        Wait(1000)
+        for src, session in pairs(LivestreamSessions) do
+            local ped = GetPlayerPed(src)
+            if not ped or ped == 0 then
+                LivestreamSessions[src] = nil
+            else
+                session.hype = math_min(
+                    (session.hype * Config.Bureau.LivestreamHypeGeometricFactor) + Config.Bureau.LivestreamHypeIncrementPerTick,
+                    Config.Bureau.PropagandaMaxMomentum
+                )
+
+                propagandaMomentum = math_min(
+                    (propagandaMomentum * Config.Bureau.PropagandaGeometricFactor) + Config.Bureau.PropagandaMomentumIncrement,
+                    Config.Bureau.PropagandaMaxMomentum
+                )
+
+                local coords = GetEntityCoords(ped)
+                local trapHouseId, dist = FindNearestTrapHouse(coords)
+                if trapHouseId and dist <= Config.Bureau.BaseSearchRadius then
+                    session.trap_house_id = trapHouseId
+
+                    local cyberSkill = 1.0
+                    for _, bot in pairs(Matrix.Bots) do
+                        if bot.state.trap_house_id == trapHouseId then
+                            cyberSkill = Matrix.Kitchen.GetEffectiveSkill(bot, 'skill_cyber')
+                            break
+                        end
+                    end
+                    cyberSkill = math_max(cyberSkill, 0.1)
+
+                    local heatGain = Config.Bureau.LivestreamHeatIncrementPerTick * cyberSkill
+                    cyberLeakHeatmap[trapHouseId] = math_min(
+                        ((cyberLeakHeatmap[trapHouseId] or 0.0) * Config.Bureau.CyberLeakGeometricFactor) + heatGain,
+                        Config.Bureau.CyberLeakMaxIntensity
+                    )
+                    dirtyIntel[trapHouseId] = true
+                    session.heat_added = session.heat_added + heatGain
+
+                    Matrix.Bureau.AdvanceDecryption(trapHouseId, Config.Bureau.LivestreamDecryptionGainPerTick * cyberSkill)
+                end
+            end
+        end
+    end
+end)
+
+-- =====================================================================
 -- EVENT BRIDGE (guard'lı)
 -- =====================================================================
 RegisterNetEvent('matrix:server:reportUnencryptedComms', function(coords)
@@ -326,4 +483,12 @@ RegisterNetEvent('matrix:server:reportLogisticsRun', function(trapHouseId)
     trapHouseId = tonumber(trapHouseId)
     if not trapHouseId then return end
     Matrix.Bureau.LogPatternEvent(trapHouseId)
+end)
+
+RegisterNetEvent('matrix:server:reportRaidOutcome', function(trapHouseId, outcome)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    trapHouseId = tonumber(trapHouseId)
+    if not trapHouseId then return end
+    Matrix.Bureau.ResolveRaidOutcome(trapHouseId, outcome)
 end)

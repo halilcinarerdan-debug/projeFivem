@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS `matrix_bots` (
     `economic_pressure` FLOAT NOT NULL DEFAULT 0.0,
     `cognitive_shifter` FLOAT NOT NULL DEFAULT 0.5,
     `skill_chemistry` FLOAT NOT NULL DEFAULT 0.3,
+    `skill_cyber` FLOAT NOT NULL DEFAULT 0.0,
+    `skill_logistics` FLOAT NOT NULL DEFAULT 0.0,
     `fatigue_level` FLOAT NOT NULL DEFAULT 0.0,
     `cortisol_level` FLOAT NOT NULL DEFAULT 0.0,
     `withdrawal_index` FLOAT NOT NULL DEFAULT 0.0,
@@ -228,6 +230,7 @@ CREATE TABLE IF NOT EXISTS `matrix_fleet` (
     `registered_by_citizenid` VARCHAR(50) NULL,
     `assigned_bot_id` INT NULL,
     `assignment_mode` ENUM('permanent', 'temporary') NULL,
+    `verified_stolen_plate` TINYINT(1) NOT NULL DEFAULT 0,
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
@@ -270,4 +273,68 @@ CREATE TABLE IF NOT EXISTS `matrix_vehicle_seizures` (
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     KEY `idx_matrix_vehicle_seizures_plate` (`plate`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Katman 4: Toptancı Güven Matrisi - oyuncu/toptancı ilişkisi kalıcıdır.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_supplier_trust` (
+    `citizenid` VARCHAR(50) NOT NULL,
+    `supplier_id` INT NOT NULL,
+    `trust` FLOAT NOT NULL DEFAULT 0.5,
+    `late_payments` INT NOT NULL DEFAULT 0,
+    `forensic_leaks` INT NOT NULL DEFAULT 0,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`citizenid`, `supplier_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Katman 4: Dead Drop Teslim Alma Günlüğü (asla silinmez) - her teslim
+-- alımın o anki siber yoğunluğunu ve adli iz bırakıp bırakmadığını kalıcı
+-- olarak kaydeder; matrix_supplier_trust'ın güven güncellemesi bu kayda dayanır.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_dead_drop_events` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `drop_id` INT NOT NULL,
+    `supplier_id` INT NOT NULL,
+    `citizenid` VARCHAR(50) NOT NULL,
+    `heat_at_pickup` FLOAT NOT NULL DEFAULT 0.0,
+    `forensic_trace_left` TINYINT(1) NOT NULL DEFAULT 0,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_dead_drop_events_drop` (`drop_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Katman 2: Fiziksel Şafak Baskını Günlüğü - mürettebat/breach/sonuç kaydı.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_raid_log` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `trap_house_id` INT NOT NULL,
+    `squad_size` INT NOT NULL,
+    `breach_method` VARCHAR(32) NOT NULL DEFAULT 'ram',
+    `decryption_confidence_at_raid` FLOAT NOT NULL,
+    `escape_window_seconds` INT NOT NULL DEFAULT 0,
+    `outcome` ENUM('pending', 'captured', 'escaped', 'eliminated') NOT NULL DEFAULT 'pending',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `resolved_at` DATETIME NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_raid_log_trap_house` (`trap_house_id`),
+    CONSTRAINT `fk_matrix_raid_log_trap_house`
+        FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Katman 2: qb-phone Canlı Yayın / Siber Propaganda Günlüğü (asla silinmez).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_livestream_events` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `citizenid` VARCHAR(50) NOT NULL,
+    `duration_seconds` INT NOT NULL DEFAULT 0,
+    `hype_multiplier` FLOAT NOT NULL DEFAULT 1.0,
+    `heat_added` FLOAT NOT NULL DEFAULT 0.0,
+    `trap_house_id` INT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;

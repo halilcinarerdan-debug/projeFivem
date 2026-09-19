@@ -26,7 +26,9 @@ local SetEntityCoords               = SetEntityCoords
 local TriggerClientEvent            = TriggerClientEvent
 local RegisterCommand               = RegisterCommand
 local RegisterNetEvent              = RegisterNetEvent
-local source                        = source
+-- UYARI: `source` BİLİNÇLİ OLARAK localize edilmez (bkz. main.lua'daki not) -
+-- dosya yüklenirken bir kez yakalamak her event handler'ında aynı bayat
+-- değerin okunmasına yol açar.
 
 -- botId -> dispatch record
 local ActiveDispatches = {}
@@ -168,7 +170,8 @@ function Matrix.Fleet.LoadFleet()
             vehicle_wear            = tonumber(row.vehicle_wear) or 0.0,
             registered_by_citizenid = row.registered_by_citizenid,
             assigned_bot_id         = row.assigned_bot_id,
-            assignment_mode         = row.assignment_mode
+            assignment_mode         = row.assignment_mode,
+            verified_stolen_plate   = row.verified_stolen_plate == 1
         }
         if row.assigned_bot_id and row.assignment_mode == 'permanent' then
             PermanentVehicleByBot[row.assigned_bot_id] = row.plate
@@ -189,6 +192,18 @@ function Matrix.Fleet.GetVehicle(plate)
     return FleetVehicles[plate]
 end
 
+-- QBCore'un kendi `player_vehicles` tablosunda bu plaka var mı diye bakar:
+-- varsa bu, gerçekten kayıtlı bir oyuncu aracının çalıntı olduğu anlamına
+-- gelir (sahte değil, hakiki bir "çalıntı"); şasi kazınmamışsa (factory) bu
+-- daha güçlü bir adli iz demektir. Tablo yoksa/sorgu patlarsa sessizce false.
+local function VerifyStolenPlateAgainstQbCoreVehicles(plate)
+    local ok, rows = pcall(function()
+        return MySQL.query.await('SELECT citizenid FROM player_vehicles WHERE plate = ?', { plate })
+    end)
+    if not ok or type(rows) ~= 'table' or not rows[1] then return false end
+    return true
+end
+
 function Matrix.Fleet.RegisterVehicle(citizenid, plate, vehicleClass, vinStatus, vehicleWear)
     if type(plate) ~= 'string' or plate == '' or #plate > 32 then return false, 'bad_plate' end
     if FleetVehicles[plate] then return false, 'plate_exists' end
@@ -199,6 +214,8 @@ function Matrix.Fleet.RegisterVehicle(citizenid, plate, vehicleClass, vinStatus,
         and vinStatus or Config.Logistics.Fleet.DefaultVinStatus
     vehicleWear = Matrix.Clamp(tonumber(vehicleWear) or 0.0, 0.0, 1.0)
 
+    local verifiedStolen = VerifyStolenPlateAgainstQbCoreVehicles(plate)
+
     FleetVehicles[plate] = {
         plate                   = plate,
         vehicle_class           = vehicleClass,
@@ -206,16 +223,17 @@ function Matrix.Fleet.RegisterVehicle(citizenid, plate, vehicleClass, vinStatus,
         vehicle_wear            = vehicleWear,
         registered_by_citizenid = citizenid,
         assigned_bot_id         = nil,
-        assignment_mode         = nil
+        assignment_mode         = nil,
+        verified_stolen_plate   = verifiedStolen
     }
 
     MySQL.prepare([[
-        INSERT INTO matrix_fleet (plate, vehicle_class, vin_status, vehicle_wear, registered_by_citizenid, created_at)
-        VALUES (?, ?, ?, ?, ?, NOW())
-    ]], { plate, vehicleClass, vinStatus, vehicleWear, citizenid })
+        INSERT INTO matrix_fleet (plate, vehicle_class, vin_status, vehicle_wear, registered_by_citizenid, verified_stolen_plate, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, NOW())
+    ]], { plate, vehicleClass, vinStatus, vehicleWear, citizenid, verifiedStolen and 1 or 0 })
 
-    Matrix.Log('LOGISTICS', 'İllegal araç filoya kaydedildi: %s [%s/%s] aşınma=%.2f (sahip:%s)',
-        plate, vehicleClass, vinStatus, vehicleWear, tostring(citizenid))
+    Matrix.Log('LOGISTICS', 'İllegal araç filoya kaydedildi: %s [%s/%s] aşınma=%.2f (sahip:%s) | QB-CarDealer doğrulaması:%s',
+        plate, vehicleClass, vinStatus, vehicleWear, tostring(citizenid), tostring(verifiedStolen))
     return true
 end
 
@@ -274,6 +292,11 @@ function Matrix.Fleet.SeizeVehicle(plate, cause, dnaId, coords)
     local certainty = Config.Logistics.Fleet.SeizureSealCertainty[vehicle.vin_status]
         or Config.Logistics.Fleet.SeizureSealCertainty[Config.Logistics.Fleet.DefaultVinStatus]
 
+    -- QB-CarDealer'da doğrulanmış gerçek bir çalıntı plaka, davayı güçlendirir.
+    if vehicle.verified_stolen_plate then
+        certainty = Matrix.Clamp(certainty + 0.03, 0.0, 1.0)
+    end
+
     local cx, cy, cz = 0.0, 0.0, 0.0
     if IsValidCoords(coords) then cx, cy, cz = coords.x, coords.y, coords.z end
 
@@ -318,6 +341,208 @@ function Matrix.Logistics.OnVehicleEncircled(plate, cause)
 
     return Matrix.Fleet.SeizeVehicle(plate, cause or 'police_encirclement', dnaId, coords)
 end
+
+-- =====================================================================
+-- TOPTANCI İLİŞKİ MATRİSİ & DEAD DROP LOJİSTİĞİ
+-- =====================================================================
+Matrix.Supplier = Matrix.Supplier or {}
+
+local SupplierTrustCache = {} -- 'citizenid#supplierId' -> { citizenid, supplier_id, trust, late_payments, forensic_leaks }
+local ActiveDrops        = {} -- dropId -> { supplier_id, citizenid, requested_at, expires_at }
+local DropHeat            = {} -- dropId -> siber yoğunluk (kullanımla büyür, zamanla söner)
+
+local function TrustKey(citizenid, supplierId)
+    return tostring(citizenid) .. '#' .. tostring(supplierId)
+end
+
+local function GetDropConfig(dropId)
+    for _, drop in ipairs(Config.Supplier.DeadDrops) do
+        if drop.id == dropId then return drop end
+    end
+    return nil
+end
+
+local function FindActiveDeadDropAt(coords)
+    for dropId, drop in pairs(ActiveDrops) do
+        local cfg = GetDropConfig(dropId)
+        if cfg and VectorDistance(coords, cfg.coords) <= cfg.radius then
+            return dropId, drop, cfg
+        end
+    end
+    return nil
+end
+
+function Matrix.Supplier.LoadTrust()
+    local rows = MySQL.query.await('SELECT * FROM matrix_supplier_trust', {}) or {}
+    for _, row in ipairs(rows) do
+        SupplierTrustCache[TrustKey(row.citizenid, row.supplier_id)] = {
+            citizenid       = row.citizenid,
+            supplier_id     = row.supplier_id,
+            trust           = tonumber(row.trust) or Config.Supplier.DefaultTrust,
+            late_payments   = row.late_payments or 0,
+            forensic_leaks  = row.forensic_leaks or 0
+        }
+    end
+    Matrix.Log('LOGISTICS', '%d toptancı güven ilişkisi yüklendi.', #rows)
+end
+
+CreateThread(function()
+    Matrix.Supplier.LoadTrust()
+end)
+
+function Matrix.Supplier.GetTrustRecord(citizenid, supplierId)
+    local key = TrustKey(citizenid, supplierId)
+    local rec = SupplierTrustCache[key]
+    if not rec then
+        rec = { citizenid = citizenid, supplier_id = supplierId, trust = Config.Supplier.DefaultTrust, late_payments = 0, forensic_leaks = 0 }
+        SupplierTrustCache[key] = rec
+    end
+    return rec
+end
+
+function Matrix.Supplier.GetTrust(citizenid, supplierId)
+    return Matrix.Supplier.GetTrustRecord(citizenid, supplierId).trust
+end
+
+local function PersistTrust(rec)
+    MySQL.prepare([[
+        INSERT INTO matrix_supplier_trust (citizenid, supplier_id, trust, late_payments, forensic_leaks, updated_at)
+        VALUES (?, ?, ?, ?, ?, NOW())
+        ON DUPLICATE KEY UPDATE trust = VALUES(trust), late_payments = VALUES(late_payments),
+            forensic_leaks = VALUES(forensic_leaks), updated_at = NOW()
+    ]], { rec.citizenid, rec.supplier_id, rec.trust, rec.late_payments, rec.forensic_leaks })
+end
+
+function Matrix.Supplier.GetPriceMultiplier(citizenid, supplierId)
+    local trust = Matrix.Supplier.GetTrust(citizenid, supplierId)
+    local mult = 1.0 + ((1.0 - trust) * Config.Supplier.PriceMultiplierGain)
+    return Matrix.Clamp(mult, Config.Supplier.PriceMultiplierFloor, Config.Supplier.PriceMultiplierCeiling)
+end
+
+-- Güven eşiğin altına düşerse toptancı konumu Büro'ya sızdırır / infaz mangası yollar.
+function Matrix.Supplier.TriggerBetrayal(citizenid, supplierId)
+    -- Bu dosyada oyuncuya özel bir trap house izleyicisi yok; deterministik ve
+    -- keyfi olmayan bir seçim olarak en düşük ID'li (ilk kurulan) trap house'u
+    -- Büro'ya işaret ediyoruz (RNG yok).
+    local targetId = nil
+    for id in pairs(Matrix.TrapHouses) do
+        if not targetId or id < targetId then targetId = id end
+    end
+    if targetId then
+        Matrix.Bureau.ReceiveSnitchLeak(targetId)
+    end
+
+    Matrix.Log("LOGISTICS", "[İHANET] Toptancı #%d güven eşiğinin altına düştü: %s deşifre edildi / infaz mangası yolda.",
+        supplierId, tostring(citizenid))
+    TriggerClientEvent('matrix:client:executeHitSquad', -1, citizenid, supplierId)
+end
+
+function Matrix.Supplier.ReportLatePayment(citizenid, supplierId)
+    local rec = Matrix.Supplier.GetTrustRecord(citizenid, supplierId)
+    rec.late_payments = rec.late_payments + 1
+    rec.trust = Matrix.Clamp(rec.trust - Config.Supplier.TrustLatePaymentPenalty, 0.0, 1.0)
+    PersistTrust(rec)
+
+    Matrix.Log('LOGISTICS', 'Toptancı #%d güveni düştü (gecikmiş ödeme): %s -> %.2f',
+        supplierId, tostring(citizenid), rec.trust)
+
+    if rec.trust < Config.Supplier.BetrayalTrustThreshold then
+        Matrix.Supplier.TriggerBetrayal(citizenid, supplierId)
+    end
+    return rec.trust
+end
+
+function Matrix.Supplier.RequestDrop(citizenid, dropId)
+    local dropCfg = GetDropConfig(dropId)
+    if not dropCfg then return false, 'bad_drop' end
+    if ActiveDrops[dropId] then return false, 'already_active' end
+
+    local rec = Matrix.Supplier.GetTrustRecord(citizenid, dropCfg.supplier_id)
+    if rec.trust < Config.Supplier.SupplyCutTrustThreshold then
+        return false, 'supply_cut'
+    end
+
+    ActiveDrops[dropId] = {
+        supplier_id  = dropCfg.supplier_id,
+        citizenid    = citizenid,
+        requested_at = Matrix.Now(),
+        expires_at   = Matrix.Now() + Config.Supplier.PickupWindowSeconds
+    }
+
+    local priceMultiplier = Matrix.Supplier.GetPriceMultiplier(citizenid, dropCfg.supplier_id)
+
+    Matrix.Log('LOGISTICS', 'Dead drop #%d (%s) açıldı: toptancı #%d, güven=%.2f, fiyat çarpanı=x%.2f, pencere=%ds',
+        dropId, dropCfg.label, dropCfg.supplier_id, rec.trust, priceMultiplier, Config.Supplier.PickupWindowSeconds)
+
+    return true, { price_multiplier = priceMultiplier, expires_in = Config.Supplier.PickupWindowSeconds, coords = dropCfg.coords }
+end
+
+-- actorRef: teslimi fiilen kimin/hangi botun yaptığı (adli parmak izi kalitesi
+-- için); creditCitizenid: güven güncellemesinin hangi oyuncuya işleneceği
+-- (bot bir oyuncu adına teslim alıyorsa güven o oyuncuya yazılır).
+function Matrix.Supplier.OnPickup(actorRef, dropId, creditCitizenid)
+    local drop = ActiveDrops[dropId]
+    if not drop then return false, 'no_active_drop' end
+    if Matrix.Now() > drop.expires_at then
+        ActiveDrops[dropId] = nil
+        return false, 'window_expired'
+    end
+
+    local dropCfg = GetDropConfig(dropId)
+    if not dropCfg then return false, 'bad_drop' end
+
+    local actor = Matrix.ResolveActor(actorRef)
+    local fingerprintQuality = actor and Matrix.Forensics.ComputeFingerprintQuality(actor) or 1.0
+    local forensicTraceLeft = fingerprintQuality < Config.Supplier.ForensicTraceQualityThreshold
+    local heat = DropHeat[dropId] or 0.0
+
+    local citizenid = creditCitizenid or drop.citizenid
+    local rec = Matrix.Supplier.GetTrustRecord(citizenid, drop.supplier_id)
+
+    if forensicTraceLeft or heat > 0.0 then
+        local penalty = Config.Supplier.TrustForensicLeakPenalty * (1.0 + (heat * Config.Supplier.TrustHeatmapPenaltyFactor))
+        rec.trust = Matrix.Clamp(rec.trust - penalty, 0.0, 1.0)
+        if forensicTraceLeft then rec.forensic_leaks = rec.forensic_leaks + 1 end
+    else
+        rec.trust = Matrix.Clamp(rec.trust + Config.Supplier.TrustRecoveryPerCleanPickup, 0.0, 1.0)
+    end
+    PersistTrust(rec)
+
+    DropHeat[dropId] = math_min(heat + Config.Supplier.DropHeatGrowthPerUse, 10.0)
+    ActiveDrops[dropId] = nil
+
+    MySQL.prepare([[
+        INSERT INTO matrix_dead_drop_events (drop_id, supplier_id, citizenid, heat_at_pickup, forensic_trace_left, created_at)
+        VALUES (?, ?, ?, ?, ?, NOW())
+    ]], { dropId, drop.supplier_id, citizenid, heat, forensicTraceLeft and 1 or 0 })
+
+    Matrix.Log('LOGISTICS', 'Dead drop #%d (%s) teslim alındı: %s | heat=%.2f | iz=%s | güven=%.2f',
+        dropId, dropCfg.label, tostring(citizenid), heat, tostring(forensicTraceLeft), rec.trust)
+
+    if rec.trust < Config.Supplier.BetrayalTrustThreshold then
+        Matrix.Supplier.TriggerBetrayal(citizenid, drop.supplier_id)
+    end
+
+    return true, { heat = heat, forensic_trace_left = forensicTraceLeft, trust = rec.trust }
+end
+
+-- Drop heat sönümü + süresi dolan pencerelerin temizliği (dakikalık, ayrı thread).
+CreateThread(function()
+    while true do
+        Wait(60000)
+        for dropId, heat in pairs(DropHeat) do
+            DropHeat[dropId] = math_max(heat - Config.Supplier.DropHeatDecayPerMinute, 0.0)
+        end
+
+        local now = Matrix.Now()
+        for dropId, drop in pairs(ActiveDrops) do
+            if now > drop.expires_at then
+                ActiveDrops[dropId] = nil
+                Matrix.Log('LOGISTICS', 'Dead drop #%d penceresi süresi doldu, teslim alınmadı.', dropId)
+            end
+        end
+    end
+end)
 
 -- =====================================================================
 -- KALICI ÖLÜM (PERMADEATH & HARD-DELETE)
@@ -491,6 +716,9 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatc
     return true, etaSeconds
 end
 
+-- Mega-prompt'ta anılan isimle uyumluluk için ince bir takma ad.
+Matrix.SevkBot = Matrix.Logistics.DispatchDealer
+
 -- =====================================================================
 -- TICK (1000ms, sıfır await — main.lua'nın ticker'ından bağımsız)
 -- =====================================================================
@@ -536,6 +764,9 @@ function Matrix.Logistics.Tick()
                 dispatch.comms_lost = true
                 Matrix.Log('LOGISTICS', '[BAĞLANTI KESİLDİ - SİNYAL YOK] Bot #%d (%s) kör bölgeye girdi: %s',
                     botId, bot.name, zone.label)
+                if type(dispatch.dispatcher_src) == 'number' and dispatch.dispatcher_src > 0 then
+                    Matrix.Radio.ApplyStatic(dispatch.dispatcher_src, 1.0, 'dead_zone')
+                end
             elseif (not nowInDeadZone) and dispatch.comms_lost then
                 dispatch.comms_lost = false
                 Matrix.Log('LOGISTICS', '[SİNYAL YENİDEN ALINDI] Bot #%d (%s) kör bölgeden çıktı, gecikmeli veri akışı %.1fsn içinde gelecek.',
@@ -590,6 +821,13 @@ function Matrix.Logistics.Tick()
                     if ped and ped ~= 0 and DoesEntityExist(ped) then
                         SetEntityCoords(ped, dispatch.destination.x, dispatch.destination.y, dispatch.destination.z, false, false, false, false)
                     end
+                end
+
+                -- Hedefte açık bir dead drop varsa, sevk edilen dealer malı
+                -- otomatik teslim alır (güven güncellemesi asıl talep sahibi oyuncuya işlenir).
+                local dropId, drop = FindActiveDeadDropAt(dispatch.destination)
+                if dropId then
+                    Matrix.Supplier.OnPickup({ kind = 'bot', id = botId }, dropId, drop.citizenid)
                 end
 
                 if dispatch.plate then ActiveVehicleLocks[dispatch.plate] = nil end
@@ -704,6 +942,60 @@ RegisterCommand('filobirak', function(src, args)
     Reply(src, ok and ('Araç %s serbest bırakıldı.'):format(plate) or 'Araç bulunamadı veya kalıcı atanmamış.')
 end, false)
 
+local SUPPLIER_FAILURE_MESSAGES = {
+    bad_drop         = 'Geçersiz drop.',
+    already_active    = 'Bu drop zaten açık, önce teslim alın.',
+    supply_cut        = 'Toptancı güveniniz çok düşük, tedarik kesildi.',
+    no_active_drop    = 'Bu drop şu anda aktif değil.',
+    window_expired    = 'Teslim alma penceresi doldu.'
+}
+
+RegisterCommand('dropiste', function(src, args)
+    local dropId = tonumber(args[1])
+    if not dropId then Reply(src, 'Kullanim: /dropiste [dropId]'); return end
+
+    local state = Matrix.GetOrCreatePlayerState(src)
+    local citizenid = state and state.citizenid
+    if not citizenid then Reply(src, 'Profil çözülemedi.'); return end
+
+    local ok, info = Matrix.Supplier.RequestDrop(citizenid, dropId)
+    if ok then
+        Reply(src, ('Drop #%d açıldı. Fiyat çarpanı x%.2f, %ds içinde teslim al.'):format(dropId, info.price_multiplier, info.expires_in))
+    else
+        Reply(src, SUPPLIER_FAILURE_MESSAGES[info] or ('Drop açılamadı: %s'):format(tostring(info)))
+    end
+end, false)
+
+RegisterCommand('dropcek', function(src, args)
+    local dropId = tonumber(args[1])
+    if not dropId then Reply(src, 'Kullanim: /dropcek [dropId]'); return end
+
+    local dropCfg = nil
+    for _, d in ipairs(Config.Supplier.DeadDrops) do
+        if d.id == dropId then
+            dropCfg = d
+            break
+        end
+    end
+    if not dropCfg then Reply(src, 'Geçersiz drop ID.'); return end
+
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then Reply(src, 'Ped bulunamadı.'); return end
+
+    local playerCoords = GetEntityCoords(ped)
+    if VectorDistance(playerCoords, dropCfg.coords) > dropCfg.radius then
+        Reply(src, 'Drop noktasına yeterince yakın değilsiniz.'); return
+    end
+
+    local state = Matrix.GetOrCreatePlayerState(src)
+    local ok, result = Matrix.Supplier.OnPickup({ kind = 'player', source = src }, dropId, state and state.citizenid)
+    if ok then
+        Reply(src, ('Teslim alındı. Heat:%.2f İz:%s Güven:%.2f'):format(result.heat, tostring(result.forensic_trace_left), result.trust))
+    else
+        Reply(src, SUPPLIER_FAILURE_MESSAGES[result] or ('Teslim alınamadı: %s'):format(tostring(result)))
+    end
+end, false)
+
 -- =====================================================================
 -- EVENT BRIDGE (guard'lı)
 -- =====================================================================
@@ -760,6 +1052,24 @@ RegisterNetEvent('matrix:server:reportVehicleEncircled', function(plate, cause)
     Matrix.Logistics.OnVehicleEncircled(plate, type(cause) == 'string' and cause or 'police_encirclement')
 end)
 
+RegisterNetEvent('matrix:server:requestDeadDrop', function(dropId)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    dropId = tonumber(dropId)
+    if not dropId then return end
+    local state = Matrix.GetOrCreatePlayerState(src)
+    if state then Matrix.Supplier.RequestDrop(state.citizenid, dropId) end
+end)
+
+RegisterNetEvent('matrix:server:reportLatePayment', function(supplierId)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    supplierId = tonumber(supplierId)
+    if not supplierId then return end
+    local state = Matrix.GetOrCreatePlayerState(src)
+    if state then Matrix.Supplier.ReportLatePayment(state.citizenid, supplierId) end
+end)
+
 -- =====================================================================
 -- EXPORTLAR
 -- =====================================================================
@@ -790,4 +1100,20 @@ exports('GetFleetVehicle', function(plate)
 end)
 exports('SeizeFleetVehicle', function(plate, cause)
     return Matrix.Logistics.OnVehicleEncircled(plate, cause)
+end)
+
+exports('GetSupplierTrust', function(citizenid, supplierId)
+    return Matrix.Supplier.GetTrust(citizenid, supplierId)
+end)
+exports('GetSupplierPriceMultiplier', function(citizenid, supplierId)
+    return Matrix.Supplier.GetPriceMultiplier(citizenid, supplierId)
+end)
+exports('ReportSupplierLatePayment', function(citizenid, supplierId)
+    return Matrix.Supplier.ReportLatePayment(citizenid, supplierId)
+end)
+exports('RequestDeadDrop', function(citizenid, dropId)
+    return Matrix.Supplier.RequestDrop(citizenid, dropId)
+end)
+exports('PickupDeadDrop', function(actorRef, dropId, creditCitizenid)
+    return Matrix.Supplier.OnPickup(actorRef, dropId, creditCitizenid)
 end)

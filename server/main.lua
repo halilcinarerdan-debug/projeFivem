@@ -32,7 +32,11 @@ local RegisterCommand           = RegisterCommand
 local RegisterNetEvent          = RegisterNetEvent
 local AddEventHandler           = AddEventHandler
 local GetCurrentResourceName    = GetCurrentResourceName
-local source                    = source
+-- UYARI: `source` BİLİNÇLİ OLARAK localize edilmez. FiveM her event/komut
+-- çağrısından hemen önce global `source`'u günceller; dosya yüklenirken bir
+-- kez `local source = source` yapmak bu değeri yükleme anındaki bayat
+-- değerde donduracağı ve her handler'da aynı (yanlış) src okunmasına yol
+-- açacağı için KESİNLİKLE YAPILMAZ.
 
 -- ---------- Namespace ----------
 Matrix       = Matrix       or {}
@@ -92,6 +96,31 @@ function Matrix.Inventory.MergeMetadata(inventoryId, slot, patch)
 end
 
 -- =====================================================================
+-- TELSİZ KÖPRÜSÜ (pma-voice / qb-radio)
+-- pma-voice ve qb-radio'nun kesin export imzaları fork'tan fork'a değişir;
+-- burada tahmini export adları pcall ile korumalı denenir (biri/ikisi de
+-- yoksa sessizce yutulur). Asıl statik/parazit efekti nihayetinde client
+-- event'i ('matrix:client:applyRadioStatic') dinleyen bir client script
+-- tarafından uygulanmalıdır - bu dosya sadece server-taraflı kararı verir.
+-- =====================================================================
+Matrix.Radio = Matrix.Radio or {}
+
+function Matrix.Radio.ApplyStatic(targetSrc, intensity, reason)
+    if type(targetSrc) ~= 'number' or targetSrc <= 0 then return false end
+    intensity = Matrix.Clamp(tonumber(intensity) or 1.0, 0.0, 1.0)
+
+    pcall(function()
+        exports['pma-voice']:SetRadioStatic(targetSrc, intensity)
+    end)
+    pcall(function()
+        exports['qb-radio']:SetRadioNoise(targetSrc, intensity)
+    end)
+
+    TriggerClientEvent('matrix:client:applyRadioStatic', targetSrc, intensity, reason or 'unknown')
+    return true
+end
+
+-- =====================================================================
 -- PERSISTENCE QUEUE (write-behind, batch, async)
 -- =====================================================================
 Matrix.Persistence = {
@@ -107,10 +136,11 @@ function Matrix.MarkBotDirty(botId)
 end
 
 -- Tek UPSERT sorgusu için değer/parametre üret.
-local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
+local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
 local BOT_UPSERT_HEAD =
     'INSERT INTO matrix_bots (id, dna_id, name, role, status, ' ..
     'fear_factor, resilience, snitch_tendency, economic_pressure, cognitive_shifter, skill_chemistry, ' ..
+    'skill_cyber, skill_logistics, ' ..
     'fatigue_level, cortisol_level, withdrawal_index, addiction_level, base_cortisol_recovery_rate, ' ..
     'trap_house_id, updated_at) VALUES '
 local BOT_UPSERT_TAIL =
@@ -119,6 +149,7 @@ local BOT_UPSERT_TAIL =
     'fear_factor=VALUES(fear_factor), resilience=VALUES(resilience), ' ..
     'snitch_tendency=VALUES(snitch_tendency), economic_pressure=VALUES(economic_pressure), ' ..
     'cognitive_shifter=VALUES(cognitive_shifter), skill_chemistry=VALUES(skill_chemistry), ' ..
+    'skill_cyber=VALUES(skill_cyber), skill_logistics=VALUES(skill_logistics), ' ..
     'fatigue_level=VALUES(fatigue_level), cortisol_level=VALUES(cortisol_level), ' ..
     'withdrawal_index=VALUES(withdrawal_index), addiction_level=VALUES(addiction_level), ' ..
     'base_cortisol_recovery_rate=VALUES(base_cortisol_recovery_rate), ' ..
@@ -146,6 +177,8 @@ local function BuildBotUpsert(botList)
         params[idx] = b.psychology.economic_pressure             ; idx = idx + 1
         params[idx] = b.psychology.cognitive_shifter             ; idx = idx + 1
         params[idx] = b.psychology.skill_chemistry               ; idx = idx + 1
+        params[idx] = b.psychology.skill_cyber                   ; idx = idx + 1
+        params[idx] = b.psychology.skill_logistics               ; idx = idx + 1
         params[idx] = b.biology.fatigue_level                    ; idx = idx + 1
         params[idx] = b.biology.cortisol_level                   ; idx = idx + 1
         params[idx] = b.biology.withdrawal_index                 ; idx = idx + 1
@@ -221,7 +254,9 @@ function Matrix.CreateBotRecord(profile)
             snitch_tendency   = Matrix.Clamp(profile.snitch_tendency or 0.0,   0.0, 1.0),
             economic_pressure = Matrix.Clamp(profile.economic_pressure or 0.0, 0.0, 1.0),
             cognitive_shifter = Matrix.Clamp(profile.cognitive_shifter or 0.5, 0.0, 1.0),
-            skill_chemistry   = Matrix.Clamp(profile.skill_chemistry or 0.3,   0.0, 1.0)
+            skill_chemistry   = Matrix.Clamp(profile.skill_chemistry or 0.3,   0.0, 1.0),
+            skill_cyber       = Matrix.Clamp(profile.skill_cyber or 0.0,       0.0, 1.0),
+            skill_logistics   = Matrix.Clamp(profile.skill_logistics or 0.0,   0.0, 1.0)
         },
         biology = {
             fatigue_level             = 0.0,
@@ -352,7 +387,9 @@ local function LoadBotsFromDatabase()
                 snitch_tendency   = row.snitch_tendency   or 0.0,
                 economic_pressure = row.economic_pressure or 0.0,
                 cognitive_shifter = row.cognitive_shifter or 0.5,
-                skill_chemistry   = row.skill_chemistry   or 0.3
+                skill_chemistry   = row.skill_chemistry   or 0.3,
+                skill_cyber       = row.skill_cyber       or 0.0,
+                skill_logistics   = row.skill_logistics   or 0.0
             },
             biology = {
                 fatigue_level             = row.fatigue_level              or 0.0,
@@ -382,7 +419,10 @@ end
 -- =====================================================================
 -- PED SPAWN / DESPAWN
 -- =====================================================================
-local MATRIX_PED_INJECTION_MAX_TICKS = 50
+-- "0 Resmon" kısıtı: Wait(0) her yerde yasak. Ped ağ-kaydının onayını
+-- 10ms'lik sınırlı bir bekleme ile poll'luyoruz (maks. 500ms).
+local MATRIX_PED_INJECTION_MAX_TICKS   = 50
+local MATRIX_PED_INJECTION_POLL_MS     = 10
 
 function Matrix.SpawnBot(id, coords)
     local bot = Matrix.Bots[id]
@@ -401,7 +441,7 @@ function Matrix.SpawnBot(id, coords)
 
     local ticks = 0
     while not DoesEntityExist(ped) and ticks < MATRIX_PED_INJECTION_MAX_TICKS do
-        Wait(0)
+        Wait(MATRIX_PED_INJECTION_POLL_MS)
         ticks = ticks + 1
     end
 
@@ -473,10 +513,27 @@ CreateThread(function()
             end
         end
 
+        -- Oyuncu panik-telsiz kontrolü: kortizol eşiği geçildiğinde parazit
+        -- uygula. DecayPlayerCortisol her çağrıda güvenlidir (I/O yok, sadece
+        -- bellek), master ticker'ı kirletmez.
+        for src, citizenid in pairs(Matrix.PlayerSourceIndex) do
+            local state = Matrix.PlayerState[citizenid]
+            if state and state.biology then
+                Matrix.DecayPlayerCortisol(state)
+                if state.biology.cortisol_level > Config.Kitchen.CortisolDeviationThreshold then
+                    Matrix.Radio.ApplyStatic(src, state.biology.cortisol_level, 'panic')
+                end
+            end
+        end
+
         if bureauAccumulator >= bureauInterval then
             bureauAccumulator = 0
             Matrix.Bureau.Tick()
-            Matrix.Recruitment.ScanCustomerPool()
+            -- ScanCustomerPool senkron MySQL.query.await icerir; master ticker'i
+            -- bloklamamak icin kendi coroutine'inde (async-safe) calistirilir.
+            CreateThread(function()
+                Matrix.Recruitment.ScanCustomerPool()
+            end)
         end
     end
 end)

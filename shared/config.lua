@@ -33,7 +33,14 @@ Config.Recruitment = {
     MinConfessionsToPromote    = 3,
     MaxToleratedLies           = 4,
     SafeSnitchTendencyCeiling  = 0.6,
-    MinOperationalResilience   = 0.25
+    MinOperationalResilience   = 0.25,
+
+    -- ASCII ses-dalgası sorgu terminali
+    WaveformWidth              = 20,
+    LieWaveformDeviationPerLie = 0.15,
+
+    -- Sokak Kulakları: bu momentum eşiğinin üstünde köstebek fısıltıları basılır.
+    StreetWhisperMomentumThreshold = 0.5
 }
 
 Config.Bureau = {
@@ -58,7 +65,23 @@ Config.Bureau = {
     CyberLeakIncrement         = 0.05,
     CyberLeakMaxIntensity      = 5.0,
     PostRaidHeatmapDecay       = 0.5,
-    PostRaidDecryptionReset    = 0.0
+    PostRaidDecryptionReset    = 0.0,
+
+    -- qb-phone Canlı Yayın / Siber Propaganda Köprüsü. Hype, propagandaMomentum'un
+    -- kendisini besler (Recruit_chance zaten momentum'a bağlı); bedel olarak en
+    -- yakın trap house'un cyber-leak heatmap'i ve deşifre katsayısı da yükselir.
+    LivestreamHypeGeometricFactor    = 1.05,
+    LivestreamHypeIncrementPerTick   = 0.05,
+    LivestreamHeatIncrementPerTick   = 0.02,
+    LivestreamDecryptionGainPerTick  = 0.005,
+
+    -- Fiziksel Şafak Baskını mürettebat/breach matrisi (deterministik, RNG yok).
+    RaidBaseSquadSize          = 2,
+    RaidHeatSquadFactor        = 1.5,
+    RaidMaxSquadSize           = 8,
+    RaidExplosiveBreachThreshold = 0.97, -- bu kesinlikte breach_method='explosive', altinda 'ram'
+    RaidBaseEscapeWindowSeconds = 20,
+    RaidDeadZoneEscapeBonusSeconds = 25 -- trap house bir kör noktaya yakınsa Büro telsizi de bozulur
 }
 
 Config.Kitchen = {
@@ -66,8 +89,13 @@ Config.Kitchen = {
         idle         = 0.0,
         lookout      = 0.01,
         distribution = 0.02,
-        cooking      = 0.035
+        cooking      = 0.035,
+        cyber_ops    = 0.015
     },
+
+    -- Pratikle organik beceri büyümesi (RNG yok): her döngüde eksik olan mesafenin
+    -- sabit bir oranı kapanır (lojistik/asymptotik öğrenme eğrisi, tavan 1.0).
+    SkillGrowthRate = 0.01,
     FatigueCortisolBleed          = 0.02,
     FatigueWarningThreshold       = 0.8,
     FatigueCriticalThreshold      = 0.9,
@@ -185,4 +213,46 @@ Config.Logistics = {
         BreakdownWearThreshold = 0.75,
         BreakdownStallSeconds  = 45
     }
+}
+
+-- =====================================================================
+-- Katman 4: Toptancı İlişki Matrisi & Dead Drop Lojistiği
+-- =====================================================================
+Config.Supplier = {
+    Suppliers = {
+        { id = 1, name = 'Los Santos Kartel',      base_price_per_gram = 12.0 },
+        { id = 2, name = 'Vagos Baglantisi',       base_price_per_gram = 9.5  },
+        { id = 3, name = 'Rus Ithalat Agi',        base_price_per_gram = 15.0 }
+    },
+    -- Her drop sabit bir toptancıya bağlıdır (tasarımcı-yerleşimli, RNG'siz).
+    DeadDrops = {
+        { id = 1, supplier_id = 1, label = 'Liman Konteyner Sahasi',       coords = vector3(-50.0, -2400.0, 5.0),   radius = 15.0 },
+        { id = 2, supplier_id = 2, label = 'Terkedilmis Benzin Istasyonu', coords = vector3(1700.0, 3200.0, 40.0),  radius = 15.0 },
+        { id = 3, supplier_id = 3, label = 'Havaalani Kargo Deposu',      coords = vector3(-1000.0, -2700.0, 15.0), radius = 15.0 }
+    },
+
+    DefaultTrust                = 0.5,
+    TrustLatePaymentPenalty     = 0.15,
+    TrustForensicLeakPenalty    = 0.10,
+    TrustHeatmapPenaltyFactor   = 0.20,
+    TrustRecoveryPerCleanPickup = 0.03,
+
+    PriceMultiplierFloor   = 1.0,
+    PriceMultiplierCeiling = 4.0,
+    PriceMultiplierGain    = 1.0, -- fiyat = base * (1 + (1-trust) * gain), floor/ceiling'e clamp
+
+    -- Bu eşiğin altında toptancı tedariği tamamen keser.
+    SupplyCutTrustThreshold = 0.1,
+    -- Bu eşiğin altında toptancı konumu Büro'ya sızdırır / infaz mangası yollar.
+    BetrayalTrustThreshold  = 0.1,
+
+    -- Fingerprint kalitesi bu eşiğin altındaysa (yüksek kortizol/panik) teslimde
+    -- adli iz bırakılmış sayılır.
+    ForensicTraceQualityThreshold = 0.5,
+
+    -- Drop'un yerel siber yoğunluğu her kullanımda büyür, boşta yavaşça söner.
+    DropHeatGrowthPerUse   = 0.25,
+    DropHeatDecayPerMinute = 0.01,
+
+    PickupWindowSeconds = 600
 }

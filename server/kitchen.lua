@@ -1,5 +1,24 @@
 Matrix.Kitchen = {}
 
+-- Hangi aktivite hangi beceriyi pratikle organik olarak büyütür (RNG yok).
+local ACTIVITY_SKILL_MAP = {
+    cooking      = 'skill_chemistry',
+    distribution = 'skill_logistics',
+    cyber_ops    = 'skill_cyber'
+}
+
+local function ApplyOrganicSkillGrowth(bot)
+    local skillKey = ACTIVITY_SKILL_MAP[bot.state.activity]
+    if not skillKey then return end
+
+    local current = bot.psychology[skillKey] or 0.0
+    -- Asymptotik öğrenme eğrisi: 1.0'a yaklaştıkça büyüme yavaşlar, tavanı asla aşmaz.
+    bot.psychology[skillKey] = Matrix.Clamp(
+        current + ((1.0 - current) * Config.Kitchen.SkillGrowthRate),
+        0.0, 1.0
+    )
+end
+
 local function ApplyCortisolDeviation(bot)
     if not bot.state.coords then return end
 
@@ -23,6 +42,8 @@ end
 
 function Matrix.Kitchen.ProcessMinuteCycle(bot)
     local workFactor = Config.Kitchen.WorkFactor[bot.state.activity] or Config.Kitchen.WorkFactor.idle
+
+    ApplyOrganicSkillGrowth(bot)
 
     bot.biology.fatigue_level = Matrix.Clamp(
         bot.biology.fatigue_level + (workFactor * (2.0 - bot.psychology.cognitive_shifter)),
@@ -102,6 +123,30 @@ function Matrix.Kitchen.AdjustCortisol(actorRef, spikeType)
     Matrix.Log('KITCHEN', 'Kortizol sıçraması (%s): %s -> %.2f', spikeType, actor.dna_id, actor.biology.cortisol_level)
 end
 
+-- Bot İçi İhbar: bağımlı bir bot mutfaktan çalarken, aynı trap house'ta
+-- duran ("temiz", addiction_level<=0) en düşük ID'li bot merkeze telsiz
+-- cızırtısıyla iç ihbar geçer (deterministik seçim, RNG yok).
+local function FindCleanBotAtTrapHouse(trapHouseId, excludeBotId)
+    local foundId, foundBot = nil, nil
+    for id, b in pairs(Matrix.Bots) do
+        if id ~= excludeBotId and b.status == 'active' and b.state.trap_house_id == trapHouseId
+            and (b.biology.addiction_level or 0.0) <= 0.0 then
+            if not foundId or id < foundId then
+                foundId, foundBot = id, b
+            end
+        end
+    end
+    return foundId, foundBot
+end
+
+local function BroadcastCleanBotTip(trapHouseId, thiefDnaId, excludeBotId)
+    local cleanId, cleanBot = FindCleanBotAtTrapHouse(trapHouseId, excludeBotId)
+    if not cleanBot then return end
+
+    Matrix.Log('KITCHEN', '[BZZZT] Merkez, %s\'in elleri titriyordu, tartı sapmalı. (Bildiren: Bot #%d %s)',
+        thiefDnaId, cleanId, cleanBot.name)
+end
+
 function Matrix.Kitchen.ProcessCook(actorRef, trapHouseId, rawWeight, rawPurity, agentWeight)
     local actor = Matrix.ResolveActor(actorRef)
     if not actor then return nil end
@@ -125,6 +170,7 @@ function Matrix.Kitchen.ProcessCook(actorRef, trapHouseId, rawWeight, rawPurity,
             '[SİSTEMİK ANOMALİ: LABORATUVAR HASSAS TARTI SAPMASI] %s, %.1fg mal çaldı.',
             actor.dna_id, theftAmount
         )
+        BroadcastCleanBotTip(trapHouseId, actor.dna_id, actor.id)
     end
 
     local finalWeight = math.max((rawWeight + agentWeight) - wasteVolume - theftAmount, 0.0)
