@@ -351,26 +351,26 @@ local function ForwardCoordsFromPlayer(source, distance)
     )
 end
 
-QBCore.Commands.Add('botyarat', 'Yeni pasif bot matrisi olusturur (Katman 1: Core Matrix)', {
-    { name = 'name', help = 'Bot adi (ornek: Ricky_Trap)' },
-    { name = 'role', help = 'Rol: dealer/runner/lookout/cooking' }
-}, true, function(source, args)
+RegisterCommand('botyarat', function(source, args)
     local name = args[1]
     local role = args[2] or 'runner'
+
+    if not name then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Kullanim: /botyarat [isim] [rol]' } })
+        return
+    end
 
     local bot = Matrix.CreateBotRecord({ name = name, role = role })
 
     TriggerClientEvent('chat:addMessage', source, {
         args = { '[MATRIX]', ('Bot #%d matrise yazıldı: %s (%s)'):format(bot.id, bot.name, bot.role) }
     })
-end)
+end, false)
 
-QBCore.Commands.Add('botspawn', 'Belirtilen botu oyuncunun tam onune enjekte eder (Katman 1: Entity Injection)', {
-    { name = 'id', help = 'Bot ID' }
-}, true, function(source, args)
+RegisterCommand('botspawn', function(source, args)
     local botId = tonumber(args[1])
     if not botId then
-        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Geçersiz bot ID.' } })
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Kullanim: /botspawn [id]' } })
         return
     end
 
@@ -383,14 +383,12 @@ QBCore.Commands.Add('botspawn', 'Belirtilen botu oyuncunun tam onune enjekte ede
             success and ('Bot #%d enjekte edildi.'):format(botId) or ('Bot #%d enjekte edilemedi.'):format(botId)
         }
     })
-end)
+end, false)
 
-QBCore.Commands.Add('botdespawn', 'Botu dunyadan tamamen siler ve hafiza matrisine geri ceker (0 Resmon hedefi)', {
-    { name = 'id', help = 'Bot ID' }
-}, true, function(source, args)
+RegisterCommand('botdespawn', function(source, args)
     local botId = tonumber(args[1])
     if not botId then
-        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Geçersiz bot ID.' } })
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Kullanim: /botdespawn [id]' } })
         return
     end
 
@@ -402,7 +400,7 @@ QBCore.Commands.Add('botdespawn', 'Botu dunyadan tamamen siler ve hafiza matrisi
             success and ('Bot #%d hafıza matrisine geri çekildi.'):format(botId) or ('Bot #%d geri çekilemedi.'):format(botId)
         }
     })
-end)
+end, false)
 
 exports('CreateBot', function(profile) return Matrix.CreateBotRecord(profile) end)
 exports('SpawnBot', function(id, coords) return Matrix.SpawnBot(id, coords) end)
