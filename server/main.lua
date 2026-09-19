@@ -405,6 +405,115 @@ RegisterCommand('botdespawn', function(source, args)
     })
 end, false)
 
+RegisterCommand('balistiktest', function(source, args)
+    local weaponSerial = args[1] or 'TEST-SERIAL-0001'
+    local weaponWear = tonumber(args[2]) or 0.0
+
+    local result = Matrix.Forensics.SimulateWeaponFire({ kind = 'player', source = source }, weaponSerial, weaponWear, 'test_fire')
+    if not result then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Test başarısız: oyuncu profili çözülemedi.' } })
+        return
+    end
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = {
+            '[MATRIX]',
+            ('BalistikID:%s | Q_kovan:%.3f | Parmak izi kalite:%.3f | Eşleşme:%.3f | Mühürlendi:%s'):format(
+                result.ballistic_id, result.striation_quality, result.fingerprint_quality,
+                result.match_certainty, tostring(result.sealed)
+            )
+        }
+    })
+end, false)
+
+RegisterCommand('botbalistik', function(source, args)
+    local botId = tonumber(args[1])
+    if not botId or not Matrix.Bots[botId] then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Kullanim: /botbalistik [id] [seri] [asinma 0-1]' } })
+        return
+    end
+
+    local weaponSerial = args[2] or ('TEST-SERIAL-BOT-%d'):format(botId)
+    local weaponWear = tonumber(args[3]) or 0.0
+
+    local result = Matrix.Forensics.SimulateWeaponFire({ kind = 'bot', id = botId }, weaponSerial, weaponWear, 'test_fire')
+    if not result then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Test başarısız.' } })
+        return
+    end
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = {
+            '[MATRIX]',
+            ('Bot #%d | BalistikID:%s | Q_kovan:%.3f | Eşleşme:%.3f | Mühürlendi:%s'):format(
+                botId, result.ballistic_id, result.striation_quality, result.match_certainty, tostring(result.sealed)
+            )
+        }
+    })
+end, false)
+
+RegisterCommand('kortizolum', function(source)
+    local state = Matrix.GetOrCreatePlayerState(source)
+    if not state then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Profil çözülemedi.' } })
+        return
+    end
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = {
+            '[MATRIX]',
+            ('Kortizol:%.2f | Yorgunluk:%.2f | Direnç:%.2f | Toparlanma oranı:%.4f'):format(
+                state.biology.cortisol_level, state.biology.fatigue_level,
+                state.biology.resilience, state.biology.base_cortisol_recovery_rate
+            )
+        }
+    })
+end, false)
+
+RegisterCommand('kortizoltetikle', function(source, args)
+    local spikeType = args[1] or 'gunshot'
+    if spikeType ~= 'gunshot' and spikeType ~= 'bureau_vehicle' then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Kullanim: /kortizoltetikle [gunshot|bureau_vehicle]' } })
+        return
+    end
+
+    Matrix.Kitchen.AdjustCortisol({ kind = 'player', source = source }, spikeType)
+    local state = Matrix.GetOrCreatePlayerState(source)
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = {
+            '[MATRIX]',
+            ('Kortizol sıçraması uygulandı (%s). Yeni seviye: %.2f'):format(spikeType, state.biology.cortisol_level)
+        }
+    })
+end, false)
+
+RegisterCommand('botdurum', function(source, args)
+    local botId = tonumber(args[1])
+    local bot = botId and Matrix.Bots[botId]
+    if not bot then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Kullanim: /botdurum [id]' } })
+        return
+    end
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = {
+            '[MATRIX]',
+            ('Bot #%d [%s] Kortizol:%.2f Yorgunluk:%.2f Yoksunluk:%.2f Direnç:%.2f'):format(
+                bot.id, bot.name, bot.biology.cortisol_level, bot.biology.fatigue_level,
+                bot.biology.withdrawal_index, bot.psychology.resilience
+            )
+        }
+    })
+
+    Matrix.Log(
+        'CORE',
+        '[/botdurum] Bot #%d bio-anlık-görüntü -> cortisol:%.4f fatigue:%.4f withdrawal:%.4f resilience:%.4f recovery_rate:%.4f addiction:%.4f',
+        bot.id, bot.biology.cortisol_level, bot.biology.fatigue_level, bot.biology.withdrawal_index,
+        bot.psychology.resilience, bot.biology.base_cortisol_recovery_rate, bot.biology.addiction_level
+    )
+end, false)
+
 exports('CreateBot', function(profile) return Matrix.CreateBotRecord(profile) end)
 exports('SpawnBot', function(id, coords) return Matrix.SpawnBot(id, coords) end)
 exports('DespawnBot', function(id) return Matrix.DespawnBot(id) end)
@@ -413,6 +522,9 @@ exports('GetBot', function(id) return Matrix.GetBot(id) end)
 
 exports('ReportWeaponDischarge', function(actorRef, weaponSerial, inventoryId, slot)
     return Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, inventoryId, slot)
+end)
+exports('SimulateWeaponFire', function(actorRef, weaponSerial, weaponWear, evidenceType)
+    return Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, evidenceType)
 end)
 exports('StampTouch', function(actorRef, inventoryId, slot)
     return Matrix.Forensics.StampTouch(actorRef, inventoryId, slot)

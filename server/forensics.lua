@@ -34,13 +34,12 @@ function Matrix.Forensics.RegisterOrGetBallisticId(weaponSerial, weaponWear)
     return ballisticId
 end
 
-function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryId, casingSlot)
+function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, evidenceType)
     local actor = Matrix.ResolveActor(actorRef)
     if not actor then return nil end
 
-    local casingMeta = Matrix.Inventory.GetSlotMetadata(casingInventoryId, casingSlot)
-    local durability = tonumber(casingMeta.durability) or 100.0
-    local weaponWear = Matrix.Clamp(1.0 - (durability / 100.0), 0.0, 1.0)
+    weaponWear = Matrix.Clamp(weaponWear or 0.0, 0.0, 1.0)
+    evidenceType = evidenceType or 'casing'
 
     local ballisticId = Matrix.Forensics.RegisterOrGetBallisticId(weaponSerial, weaponWear)
 
@@ -50,14 +49,6 @@ function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryI
     )
     local fingerprintQuality = Matrix.Forensics.ComputeFingerprintQuality(actor)
     local dnaId = GetActorDnaId(actor)
-
-    Matrix.Inventory.MergeMetadata(casingInventoryId, casingSlot, {
-        ballistic_id = ballisticId,
-        striation_quality = qKovan,
-        fingerprint_id = dnaId,
-        fingerprint_quality = fingerprintQuality
-    })
-
     local matchCertainty = qKovan * Config.BallisticStriationPrecision
     local sealed = matchCertainty > Config.Forensics.MatchCertaintyThreshold
 
@@ -67,9 +58,9 @@ function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryI
         INSERT INTO matrix_forensic_evidence (
             ballistic_id, evidence_type, striation_quality, fingerprint_id, fingerprint_quality,
             match_certainty, sealed_as_crime_weapon, coords_x, coords_y, coords_z, created_at
-        ) VALUES (?, 'casing', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     ]], {
-        ballisticId, qKovan, dnaId, fingerprintQuality, matchCertainty, sealed and 1 or 0,
+        ballisticId, evidenceType, qKovan, dnaId, fingerprintQuality, matchCertainty, sealed and 1 or 0,
         actorCoords and actorCoords.x or 0.0,
         actorCoords and actorCoords.y or 0.0,
         actorCoords and actorCoords.z or 0.0
@@ -82,7 +73,34 @@ function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryI
         Matrix.Log('FORENSICS', '[MÜHÜRLENDI] %s "Suç Aleti" olarak sınıflandırıldı. Eşleşme: %.4f', ballisticId, matchCertainty)
     end
 
-    return evidenceId, matchCertainty, sealed
+    return {
+        evidence_id = evidenceId,
+        ballistic_id = ballisticId,
+        dna_id = dnaId,
+        weapon_wear = weaponWear,
+        striation_quality = qKovan,
+        fingerprint_quality = fingerprintQuality,
+        match_certainty = matchCertainty,
+        sealed = sealed
+    }
+end
+
+function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryId, casingSlot)
+    local casingMeta = Matrix.Inventory.GetSlotMetadata(casingInventoryId, casingSlot)
+    local durability = tonumber(casingMeta.durability) or 100.0
+    local weaponWear = Matrix.Clamp(1.0 - (durability / 100.0), 0.0, 1.0)
+
+    local result = Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, 'casing')
+    if not result then return nil end
+
+    Matrix.Inventory.MergeMetadata(casingInventoryId, casingSlot, {
+        ballistic_id = result.ballistic_id,
+        striation_quality = result.striation_quality,
+        fingerprint_id = result.dna_id,
+        fingerprint_quality = result.fingerprint_quality
+    })
+
+    return result.evidence_id, result.match_certainty, result.sealed
 end
 
 function Matrix.Forensics.StampTouch(actorRef, inventoryId, slot)
