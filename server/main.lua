@@ -363,7 +363,7 @@ QBCore.Commands.Add('botyarat', 'Yeni pasif bot matrisi olusturur (Katman 1: Cor
     TriggerClientEvent('chat:addMessage', source, {
         args = { '[MATRIX]', ('Bot #%d matrise yazıldı: %s (%s)'):format(bot.id, bot.name, bot.role) }
     })
-end, 'admin')
+end)
 
 QBCore.Commands.Add('botspawn', 'Belirtilen botu oyuncunun tam onune enjekte eder (Katman 1: Entity Injection)', {
     { name = 'id', help = 'Bot ID' }
@@ -383,7 +383,7 @@ QBCore.Commands.Add('botspawn', 'Belirtilen botu oyuncunun tam onune enjekte ede
             success and ('Bot #%d enjekte edildi.'):format(botId) or ('Bot #%d enjekte edilemedi.'):format(botId)
         }
     })
-end, 'admin')
+end)
 
 QBCore.Commands.Add('botdespawn', 'Botu dunyadan tamamen siler ve hafiza matrisine geri ceker (0 Resmon hedefi)', {
     { name = 'id', help = 'Bot ID' }
@@ -402,7 +402,7 @@ QBCore.Commands.Add('botdespawn', 'Botu dunyadan tamamen siler ve hafiza matrisi
             success and ('Bot #%d hafıza matrisine geri çekildi.'):format(botId) or ('Bot #%d geri çekilemedi.'):format(botId)
         }
     })
-end, 'admin')
+end)
 
 exports('CreateBot', function(profile) return Matrix.CreateBotRecord(profile) end)
 exports('SpawnBot', function(id, coords) return Matrix.SpawnBot(id, coords) end)
