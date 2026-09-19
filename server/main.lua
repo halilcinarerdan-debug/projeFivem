@@ -225,34 +225,76 @@ local function LoadBotsFromDatabase()
     Matrix.Log('CORE', '%d bot matristen belleğe yüklendi.', #rows)
 end
 
+local MATRIX_DEALER_MODEL = 's_m_y_dealer_01'
+local MATRIX_PED_INJECTION_MAX_TICKS = 50
+
 function Matrix.SpawnBot(id, coords)
     local bot = Matrix.Bots[id]
-    if not bot or bot.state.spawned then return false end
+    if not bot then
+        Matrix.Log('CORE', '[HATA] Spawn reddedildi: Bot #%d matriste bulunamadı.', id)
+        return false
+    end
 
-    bot.state.coords = coords
+    if bot.state.spawned then
+        Matrix.Log('CORE', '[HATA] Spawn reddedildi: Bot #%d zaten aktif.', id)
+        return false
+    end
+
+    local modelHash = GetHashKey(MATRIX_DEALER_MODEL)
+    local heading = coords.w or 0.0
+
+    local ped = CreatePed(4, modelHash, coords.x, coords.y, coords.z, heading, true, false)
+
+    local injectionTicks = 0
+    while not DoesEntityExist(ped) and injectionTicks < MATRIX_PED_INJECTION_MAX_TICKS do
+        Wait(0)
+        injectionTicks = injectionTicks + 1
+    end
+
+    if not DoesEntityExist(ped) then
+        Matrix.Log('CORE', '[HATA] Bot #%d için OneSync ped doğrulaması zaman aşımına uğradı.', id)
+        return false
+    end
+
+    SetEntityAsMissionEntity(ped, true, true)
+    local netId = NetworkGetNetworkIdFromEntity(ped)
+
     bot.state.spawned = true
-    TriggerClientEvent('matrix:client:injectBot', -1, id, bot.role, coords, bot.dna_id)
-    Matrix.Log('CORE', 'Bot #%d dünyaya enjekte edildi (%.1f, %.1f, %.1f)', id, coords.x, coords.y, coords.z)
-    return true
+    bot.state.net_id = netId
+    bot.state.coords = vector3(coords.x, coords.y, coords.z)
+
+    TriggerClientEvent('matrix:client:injectBot', -1, id, bot.role, coords, bot.dna_id, netId)
+    Matrix.Log('CORE', 'Bot #%d dünyaya enjekte edildi (%.1f, %.1f, %.1f) NetID:%d', id, coords.x, coords.y, coords.z, netId)
+    return true, netId
 end
 
 function Matrix.DespawnBot(id)
     local bot = Matrix.Bots[id]
-    if not bot or not bot.state.spawned then return false end
+    if not bot then
+        Matrix.Log('CORE', '[HATA] Despawn reddedildi: Bot #%d matriste bulunamadı.', id)
+        return false
+    end
+
+    if not bot.state.spawned then
+        Matrix.Log('CORE', '[HATA] Despawn reddedildi: Bot #%d zaten pasif.', id)
+        return false
+    end
+
+    if bot.state.net_id then
+        local ped = NetworkGetEntityFromNetworkId(bot.state.net_id)
+        if ped and ped ~= 0 and DoesEntityExist(ped) then
+            DeleteEntity(ped)
+        end
+    end
 
     TriggerClientEvent('matrix:client:extractBot', -1, id)
+
     bot.state.spawned = false
     bot.state.net_id = nil
-    Matrix.Log('CORE', 'Bot #%d saf veriye geri çekildi.', id)
+
+    Matrix.Log('CORE', 'Bot #%d dünyadan silindi ve saf veriye (arka plan cache matrisine) geri çekildi.', id)
     return true
 end
-
-RegisterNetEvent('matrix:server:bindBotEntity', function(botId, netId)
-    local bot = Matrix.Bots[botId]
-    if bot then
-        bot.state.net_id = netId
-    end
-end)
 
 local bureauAccumulator = 0
 
@@ -294,6 +336,73 @@ AddEventHandler('onResourceStop', function(resourceName)
 
     Matrix.Log('CORE', 'Tüm bot verileri kalıcı depoya yazıldı. Kaynak durduruluyor.')
 end)
+
+local function ForwardCoordsFromPlayer(source, distance)
+    local ped = GetPlayerPed(source)
+    local playerCoords = GetEntityCoords(ped)
+    local playerHeading = GetEntityHeading(ped)
+    local rad = math.rad(playerHeading)
+
+    return vector4(
+        playerCoords.x - (math.sin(rad) * distance),
+        playerCoords.y + (math.cos(rad) * distance),
+        playerCoords.z,
+        (playerHeading + 180.0) % 360.0
+    )
+end
+
+QBCore.Commands.Add('botyarat', 'Yeni pasif bot matrisi olusturur (Katman 1: Core Matrix)', {
+    { name = 'name', help = 'Bot adi (ornek: Ricky_Trap)' },
+    { name = 'role', help = 'Rol: dealer/runner/lookout/cooking' }
+}, true, function(source, args)
+    local name = args[1]
+    local role = args[2] or 'runner'
+
+    local bot = Matrix.CreateBotRecord({ name = name, role = role })
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = { '[MATRIX]', ('Bot #%d matrise yazıldı: %s (%s)'):format(bot.id, bot.name, bot.role) }
+    })
+end, 'admin')
+
+QBCore.Commands.Add('botspawn', 'Belirtilen botu oyuncunun tam onune enjekte eder (Katman 1: Entity Injection)', {
+    { name = 'id', help = 'Bot ID' }
+}, true, function(source, args)
+    local botId = tonumber(args[1])
+    if not botId then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Geçersiz bot ID.' } })
+        return
+    end
+
+    local spawnCoords = ForwardCoordsFromPlayer(source, 2.0)
+    local success = Matrix.SpawnBot(botId, spawnCoords)
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = {
+            '[MATRIX]',
+            success and ('Bot #%d enjekte edildi.'):format(botId) or ('Bot #%d enjekte edilemedi.'):format(botId)
+        }
+    })
+end, 'admin')
+
+QBCore.Commands.Add('botdespawn', 'Botu dunyadan tamamen siler ve hafiza matrisine geri ceker (0 Resmon hedefi)', {
+    { name = 'id', help = 'Bot ID' }
+}, true, function(source, args)
+    local botId = tonumber(args[1])
+    if not botId then
+        TriggerClientEvent('chat:addMessage', source, { args = { '[MATRIX]', 'Geçersiz bot ID.' } })
+        return
+    end
+
+    local success = Matrix.DespawnBot(botId)
+
+    TriggerClientEvent('chat:addMessage', source, {
+        args = {
+            '[MATRIX]',
+            success and ('Bot #%d hafıza matrisine geri çekildi.'):format(botId) or ('Bot #%d geri çekilemedi.'):format(botId)
+        }
+    })
+end, 'admin')
 
 exports('CreateBot', function(profile) return Matrix.CreateBotRecord(profile) end)
 exports('SpawnBot', function(id, coords) return Matrix.SpawnBot(id, coords) end)
