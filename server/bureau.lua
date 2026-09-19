@@ -306,6 +306,12 @@ function Matrix.Bureau.GetPropagandaMomentum()
     return propagandaMomentum
 end
 
+-- ★ KATMAN 5: salt-okunur getter (market.lua'nın Taktik HUD'u için). Var
+-- olan cyberLeakHeatmap'i okur — Büro'nun formüllerinin KENDİSİNE dokunmaz.
+function Matrix.Bureau.GetHeat(trapHouseId)
+    return cyberLeakHeatmap[trapHouseId] or 0.0
+end
+
 local function FlushDirtyIntel()
     for id in pairs(dirtyIntel) do
         local heat = cyberLeakHeatmap[id] or 0.0

@@ -117,6 +117,23 @@ function Matrix.Hierarchy.SetRank(citizenid, rank, assignedBy)
     return true
 end
 
+-- ★ KATMAN 5 SERTLEŞTİRME: hedef oyuncu YENİ bağlanmışsa Matrix.QBX:GetPlayer
+-- (qbx_core'un kendi asenkron yükleme sırası nedeniyle) geçici olarak nil
+-- dönebilir. Bu SADECE /rutbeata'nın hedef çözümlemesinde 3 deneme / 300ms
+-- aralıklarla (toplam en fazla ~600ms) sınırlı bir retry uygular — komut
+-- kendi coroutine'inde çalıştığından bu Wait() master ticker'ı ETKİLEMEZ.
+-- Genel amaçlı Matrix.GetOrCreatePlayerState'e KASITLI OLARAK dokunulmadı:
+-- o fonksiyon ticker/event bridge gibi Wait() kaldıramayan onlarca yerden
+-- çağrılıyor, oraya bir retry eklemek YANLIŞ yerde bloklamaya yol açardı.
+local function ResolveTargetCitizenidWithRetry(targetSrc)
+    for attempt = 1, 3 do
+        local state = Matrix.GetOrCreatePlayerState(targetSrc)
+        if state and state.citizenid then return state.citizenid end
+        if attempt < 3 then Wait(300) end
+    end
+    return nil
+end
+
 RegisterCommand('rutbeata', function(src, args)
     local targetSrc = tonumber(args[1])
     local rank = args[2]
@@ -124,15 +141,15 @@ RegisterCommand('rutbeata', function(src, args)
         Reply(src, 'Kullanim: /rutbeata [targetSrc] [Leader|Logistics_Officer|Chemist]'); return
     end
 
-    local targetState = Matrix.GetOrCreatePlayerState(targetSrc)
-    if not targetState or not targetState.citizenid then
-        Reply(src, 'Hedef oyuncu bulunamadi.'); return
+    local targetCitizenid = ResolveTargetCitizenidWithRetry(targetSrc)
+    if not targetCitizenid then
+        Reply(src, 'Hedef oyuncu bulunamadi (3 deneme sonrasi da cozulemedi; oyuncu hala yukleniyor olabilir, birkac saniye sonra tekrar deneyin).'); return
     end
 
     local assignerState = Matrix.GetOrCreatePlayerState(src)
-    local ok, reason = Matrix.Hierarchy.SetRank(targetState.citizenid, rank, assignerState and assignerState.citizenid)
+    local ok, reason = Matrix.Hierarchy.SetRank(targetCitizenid, rank, assignerState and assignerState.citizenid)
     if ok then
-        Reply(src, ('%s rutbesi %s olarak ayarlandi.'):format(targetState.citizenid, rank))
+        Reply(src, ('%s rutbesi %s olarak ayarlandi.'):format(targetCitizenid, rank))
     elseif reason == 'bad_rank' then
         Reply(src, 'Gecersiz rutbe: Leader, Logistics_Officer veya Chemist olmali.')
     else
@@ -602,6 +619,97 @@ RegisterCommand('gizliajandurum', function(src)
     Reply(src, ('--- Toplam %d isaretli gizli ajan | Propaganda-Momentum:%.2f (esik:%.2f) ---'):format(
         count, Matrix.Bureau.GetPropagandaMomentum(), Config.Undercover.InfiltrationMomentumThreshold))
 end, false)
+
+-- =====================================================================
+-- 6) TAKTİK HUD ANLIK GÖRÜNTÜ (Sim-Level, saf metin, 0 Resmon)
+--
+-- Mimari: AYRI bir thread AÇILMAZ. main.lua'nın master ticker'ı (zaten
+-- 1000ms'de bir dönüyor) her tick'te Matrix.Hud.PushSnapshots'ı çağırır
+-- (guard'lı — bu dosya yüklü değilse no-op). PushSnapshots SADECE HUD'ı
+-- açık oyunculara (HudViewers seti) veri gönderir; kapalı oyuncular için
+-- hesaplama dahi yapılmaz. Client (client/hud.lua) veriyi aldığında sadece
+-- DrawText ile basar — hiçbir NUI/HTML/CSS yoktur.
+-- =====================================================================
+Matrix.Hud = Matrix.Hud or {}
+local HudViewers = {}   -- src -> true
+
+RegisterNetEvent('matrix:server:hudToggled', function(active)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if active then
+        HudViewers[src] = true
+    else
+        HudViewers[src] = nil
+    end
+end)
+
+AddEventHandler('playerDropped', function()
+    HudViewers[source] = nil
+end)
+
+local function FindNearestZoneCoordsForHud(coords)
+    local nearestId, nearestDist = nil, math_huge
+    for id, house in pairs(Matrix.TrapHouses or {}) do
+        local d = #(coords - house.coords)
+        if d < nearestDist then nearestId, nearestDist = id, d end
+    end
+    return nearestId
+end
+
+-- Tek bir oyuncu için 4 blokluk anlık görüntüyü üretir. Saf okuma — hiçbir
+-- state'i MUTASYONA UĞRATMAZ. header=true satırlar client'ta beyaz, diğerleri
+-- yeşil basılır (bkz. client/hud.lua).
+function Matrix.Hud.BuildSnapshot(src)
+    local state = Matrix.GetOrCreatePlayerState(src)
+    local citizenid = state and state.citizenid
+
+    local rank      = citizenid and Matrix.Hierarchy.GetRank(citizenid)
+    local authority = (citizenid and Matrix.Hierarchy.HasCommandAuthority(citizenid)) or false
+    local silent    = (citizenid and Matrix.RadioSilence.IsActive(citizenid)) or false
+
+    local ped    = GetPlayerPed(src)
+    local coords = (ped and ped ~= 0) and GetEntityCoords(ped) or nil
+    local trapId = coords and FindNearestZoneCoordsForHud(coords)
+    local house  = trapId and Matrix.TrapHouses[trapId]
+    local heat   = (trapId and Matrix.Bureau and Matrix.Bureau.GetHeat and Matrix.Bureau.GetHeat(trapId)) or 0.0
+
+    local cortisol = (state and state.biology and state.biology.cortisol_level) or 0.0
+
+    local botCount = 0
+    for _ in pairs(Matrix.Bots or {}) do botCount = botCount + 1 end
+    local dispatchCount = 0
+    for _ in pairs(Matrix.Dispatches or {}) do dispatchCount = dispatchCount + 1 end
+
+    return {
+        { text = '[KARTEL BUROSU]', header = true },
+        { text = ('RUTBE:%s  KOMUTA-YETKISI:%s'):format(rank or 'YOK', tostring(authority)) },
+        { text = '[SIBER RADAR]', header = true },
+        { text = house
+            and ('BOLGE:#%d DESIFRE:%.2f SIZINTI:%.2f SESSIZLIK:%s'):format(trapId, house.decryption_confidence, heat, tostring(silent))
+            or 'BOLGE: BILINMIYOR' },
+        { text = '[BIYOLOJIK PROFIL]', header = true },
+        { text = ('KORTIZOL:%.2f'):format(cortisol) },
+        { text = '[SAHA OPERASYONU]', header = true },
+        { text = ('AKTIF-BOT:%d  SEVKIYAT:%d'):format(botCount, dispatchCount) }
+    }
+end
+
+-- Master ticker'dan (main.lua) her 1000ms'de bir çağrılır. SADECE
+-- HudViewers'taki src'lere iş yapar — boşsa (kimse HUD açmamışsa) döngü
+-- gövdesi hiç çalışmaz (gerçek 0 Resmon).
+function Matrix.Hud.PushSnapshots()
+    for src in pairs(HudViewers) do
+        local ped = GetPlayerPed(src)
+        if not ped or ped == 0 then
+            HudViewers[src] = nil
+        else
+            local ok, snapshot = pcall(Matrix.Hud.BuildSnapshot, src)
+            if ok then
+                TriggerClientEvent('matrix:client:hudSnapshot', src, snapshot)
+            end
+        end
+    end
+end
 
 -- =====================================================================
 -- DIRTY-SET FLUSH THREAD (piyasa + nakit; hiyerarşi ayrı senkron upsert kullanır)

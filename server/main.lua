@@ -14,17 +14,44 @@
 --   (write-behind kuyruk, dirty-flag, fiziksel sevk state machine'i)
 --   TEK SATIR BİLE DEĞİŞMEDEN korundu.
 --
--- MİMARİ NOT (5/6/7/8. katman genişletmesi için):
---   Bu dosya artık iki farklı zaman ölçeğini barındırır:
---   (1) Master ticker (1.000 ms): bot biyolojisi + fiziksel dispatch takibi.
---   (2) Persist flush thread (15.000 ms): dirtyBots batch UPSERT.
---   5. katman (örn. hava durumu lojistiği) TaskVehicleDriveToCoord'un
---   sürüş parametrelerini (drivingStyle bit-mask) genişletebilir; 6. katman
---   (örn. polis AI senkronu) PoliceSources tablosunu genişletebilir; 7.
---   katman (örn. drone destekli ALPR) TrapHouses'a yeni bir gözlemci türü
---   ekleyebilir; 8. katman (örn. federal gözetim) Dispatch alanlarına yeni
---   deterministik "gözetim yoğunluğu" vektörü ekleyebilir. Hiçbiri mevcut
---   kontratları (BeginPhysicalDispatch / CompleteDispatch / Tick) bozmaz.
+-- ★ KATMAN 5 SERTLEŞTİRME REVİZYONU (bu turda eklendi):
+--   [H1] qbx_core:server:onPlayerLoaded (+ QBCore:Server:PlayerLoaded
+--        uyumluluk event'i) hook'u → PlayerState cache'i oyuncu bağlanır
+--        bağlanmaz ısıtılır (ilk komut çağrısındaki GetPlayer gecikmesi
+--        sıfırlanır). GetOrCreatePlayerState zaten idempotent olduğundan
+--        bu salt bir "warm-cache" etkisidir, yeni bir kontrat AÇMAZ.
+--   [H2] dispatch.pending_events için FIFO cap (PENDING_EVENTS_MAX=64):
+--        bot uzun süre kör bölgede kalırsa kuyruk sınırsız büyümez, en
+--        eski mesaj düşürülür.
+--   [H3] TickPhysicalDispatches iki fazlı hale getirildi: Faz 1 salt-okunur
+--        gezinir ve tamamlanacak dispatch'leri bir tabloya toplar; Faz 2
+--        (iterasyon bittikten SONRA) bu tamamlamaları uygular. NOT: Lua'da
+--        `pairs()` sırasında MEVCUT bir anahtarı nil'e ayarlamak zaten
+--        tanımlı/güvenli davranıştır (Lua 5.4 manual §3.3.5); yani tek-fazlı
+--        eski hâl teknik olarak "kırık" değildi. Bu değişikliğin gerçek
+--        değeri OKUNABİLİRLİK ve ekstra güvenlik payıdır — "ne yapılacağı"
+--        ile "ne zaman yapılacağı" ayrıştırılır.
+--   [H4] playerDropped: dispatcher_src bu oyuncuya ait TÜM aktif dispatch
+--        kayıtlarından temizlenir (dispatcher_src=nil, comms_lost=true).
+--        Bu GERÇEK bir düzeltmedir — eskiden bağlantısı kopan bir
+--        dispatcher'ın src'si dispatch üzerinde askıda kalıyordu; FiveM
+--        sunucu ID'leri yeniden kullanılabildiğinden, sonraki bir oyuncu
+--        AYNI ID'yi alırsa Matrix.Radio.ApplyStatic YANLIŞ oyuncuya telsiz
+--        statiği gönderebilirdi. Bot sevkiyatı KESİNTİSİZ devam eder,
+--        sadece telsiz bağı koptu sayılır.
+--   [H5] RefreshPoliceCache: pcall + devre kesici (5 üst üste hata → 60sn
+--        devre dışı). Qbox export'u geçici olarak hata verse bile master
+--        ticker'a bağlı 5sn'lik thread çökmez/spam basmaz.
+--   [H6] Ticker'daki kritik adımlar (bot biyoloji döngüleri, fiziksel sevk
+--        takibi, Büro tick'i, dirty-bot flush) pcall ile sarmalandı: TEK
+--        bir bot/adımdaki beklenmeyen hata artık MASTER TICKER THREAD'İNİ
+--        BÜTÜNÜYLE DÜŞÜRMEZ (eskiden yakalanmayan bir hata bu thread'i
+--        sessizce öldürüp TÜM bot biyolojisini/sevk takibini durdurabilirdi
+--        — bu GERÇEK ve önemli bir dayanıklılık kazanımıdır).
+--   [H7] Master ticker'a (5). adım eklendi: Matrix.Hud.PushSnapshots
+--        (market.lua) — SADECE HUD açık oyunculara, AYNI 1000ms saatten,
+--        ayrı bir thread AÇMADAN. Hook yoksa (market.lua yüklü değilse)
+--        no-op.
 -- =====================================================================
 
 -- ---------- Upvalue localization (perf) ----------
@@ -80,6 +107,9 @@ Matrix.Dispatches = Matrix.Dispatches or {} -- [botId] = dispatch record (fiziks
 -- Matrix.QBX:GetPlayer(src) / Matrix.QBX:GetPlayerByCitizenId(cid) /
 -- Matrix.QBX:GetQBPlayers() bundan sonra kullanılacak tüm yüzeydir.
 Matrix.QBX = exports.qbx_core
+
+-- [H2] pending_events FIFO cap (kör bölgede sınırsız RAM büyümesi önlenir).
+local PENDING_EVENTS_MAX = 64
 
 -- =====================================================================
 -- CORE MATHEMATICS
@@ -229,7 +259,13 @@ function Matrix.FlushDirtyBots()
     if count == 0 then return 0 end
 
     local query, params = BuildBotUpsert(batch)
-    if query then MySQL.prepare(query, params) end
+    if query then
+        -- [H6] pcall: batch UPSERT hata verirse flush thread'i düşmez.
+        local ok, err = pcall(function() MySQL.prepare(query, params) end)
+        if not ok then
+            Matrix.Log('CORE', '[HATA] FlushDirtyBots basarisiz (yutuldu): %s', tostring(err))
+        end
+    end
     return count
 end
 
@@ -338,11 +374,14 @@ end
 -- ★ Qbox: exports.qbx_core:GetPlayer(source) — qb-core'daki
 -- QBCore.Functions.GetPlayer(source) ile birebir aynı sözleşme (Player
 -- bulunamazsa nil döner). PlayerData.citizenid alan adı DEĞİŞMEDİ.
+-- [H6] pcall: Qbox export'u beklenmedik şekilde hata fırlatırsa (örn.
+-- resource henüz tam başlamamışken) bu ÇAĞIRANLARIN TAMAMINI (ticker,
+-- event bridge'ler, komutlar) düşürmez.
 function Matrix.GetOrCreatePlayerState(src)
     if type(src) ~= 'number' or src <= 0 then return nil end
 
-    local player = Matrix.QBX:GetPlayer(src)
-    if not player or not player.PlayerData then return nil end
+    local ok, player = pcall(function() return Matrix.QBX:GetPlayer(src) end)
+    if not ok or not player or not player.PlayerData then return nil end
     local citizenid = player.PlayerData.citizenid
     if not citizenid then return nil end
 
@@ -371,11 +410,13 @@ function Matrix.GetOrCreatePlayerState(src)
     Matrix.PlayerState[citizenid]       = state
     Matrix.PlayerSourceIndex[src]       = citizenid
 
-    MySQL.prepare([[
-        INSERT INTO matrix_player_state (citizenid, cortisol_level, fatigue_level, updated_at)
-        VALUES (?, 0.0, 0.0, NOW())
-        ON DUPLICATE KEY UPDATE citizenid = citizenid
-    ]], { citizenid })
+    pcall(function()
+        MySQL.prepare([[
+            INSERT INTO matrix_player_state (citizenid, cortisol_level, fatigue_level, updated_at)
+            VALUES (?, 0.0, 0.0, NOW())
+            ON DUPLICATE KEY UPDATE citizenid = citizenid
+        ]], { citizenid })
+    end)
 
     return state
 end
@@ -393,6 +434,42 @@ function Matrix.DecayPlayerCortisol(state)
     state.biology.cortisol_level = Matrix.Clamp(state.biology.cortisol_level - recovery, 0.0, 1.0)
     state.biology.last_update    = last + (elapsedMinutes * 60)
 end
+
+-- =====================================================================
+-- [H1] QBOX onPlayerLoaded — Warm Cache
+--
+-- Qbox `qbx_core:server:onPlayerLoaded` event'i, PlayerData'nın sunucuya
+-- tamamen yüklendiği anı bildirir. Burada state'i ısıtmak:
+--   (1) İlk komut çağrısındaki GetPlayer gecikmesini sıfırlar.
+--   (2) matrix_player_state satırını erkenden yazar (crash anında bile
+--       oyuncu kalıcı satırına sahip olur).
+-- NOT: matrix_hierarchy (co-op rütbe) bu hook'a İHTİYAÇ DUYMAZ — rütbeler
+-- citizenid bazlı ve resource açılışında TÜMÜ RAM'e yüklenir (bkz.
+-- market.lua Matrix.Hierarchy.LoadHierarchy); oyuncu online olsun ya da
+-- olmasın rütbe ataması zaten RAM+DB'de kalıcıdır. Bu hook SADECE
+-- Matrix.PlayerState (kortizol/yorgunluk) ısıtması içindir.
+-- Event payload'ı Qbox sürümüne göre değişebilir; defansif olarak birkaç
+-- olası alan adı denenir.
+-- =====================================================================
+AddEventHandler('qbx_core:server:onPlayerLoaded', function(payload)
+    local src
+    if type(payload) == 'table' then
+        src = tonumber(payload.source or payload.src or payload[1])
+    else
+        src = tonumber(payload)
+    end
+    if not src or src <= 0 then return end
+
+    -- GetOrCreatePlayerState zaten idempotent; ısıtma etkisi yaratır.
+    Matrix.GetOrCreatePlayerState(src)
+end)
+
+-- Qbox bazı sürümlerde `QBCore:Server:PlayerLoaded` da yayar (uyumluluk).
+AddEventHandler('QBCore:Server:PlayerLoaded', function(player)
+    if type(player) ~= 'table' or not player.PlayerData then return end
+    local src = tonumber(player.PlayerData.source)
+    if src and src > 0 then Matrix.GetOrCreatePlayerState(src) end
+end)
 
 -- =====================================================================
 -- DB LOAD
@@ -542,13 +619,29 @@ local DISPATCH_TASK_REISSUE_TICKS     = 25     -- 25 sn'de bir rota yeniden atan
 -- Polis oyuncuları cache'i. Her master tick'te QB job sorgusu yapmak yerine
 -- 5 sn'de bir yeniden inşa edilir → 0 Resmon hedefiyle uyumlu.
 -- ★ Qbox: exports.qbx_core:GetQBPlayers() zaten <source, Player> tablosu
--- döndürdüğü için GetPlayers()+GetPlayer(src) çiftini tek çağrıya indirger
--- (0 Resmon hedefiyle daha da uyumlu hale geldi — perf regresyonu YOK, aksine
--- iyileşme). Player.PlayerData.job.{name,onduty,type} alan adları değişmedi.
-local PoliceSources = {}
+-- döndürdüğü için GetPlayers()+GetPlayer(src) çiftini tek çağrıya indirger.
+-- [H5] pcall + devre kesici: Qbox export'u 5 kez üst üste hata verirse
+-- 60sn devre dışı bırakılır (5sn'lik thread ne çöker ne log spam'ler).
+local PoliceSources       = {}
+local policeFailCount     = 0
+local policeDisabledUntil = 0
+
 local function RefreshPoliceCache()
+    if Matrix.Now() < policeDisabledUntil then return end
+
+    local ok, players = pcall(function() return Matrix.QBX:GetQBPlayers() end)
+    if not ok or type(players) ~= 'table' then
+        policeFailCount = policeFailCount + 1
+        if policeFailCount >= 5 then
+            policeDisabledUntil = Matrix.Now() + 60
+            policeFailCount = 0
+            Matrix.Log('CORE', '[UYARI] GetQBPlayers 5 kez ust uste basarisiz oldu; 60sn devre disi birakildi.')
+        end
+        return
+    end
+    policeFailCount = 0
+
     local fresh = {}
-    local players = Matrix.QBX:GetQBPlayers() or {}
     for src, player in pairs(players) do
         if player and player.PlayerData and player.PlayerData.job then
             local job = player.PlayerData.job
@@ -755,7 +848,7 @@ function Matrix.CompleteDispatch(botId, reason)
             -- Hedefte açık bir dead drop var mı? Varsa otomatik teslim alımı.
             local drop = FindActiveDeadDropAt(dispatch.destination)
             if drop and Matrix.Supplier and Matrix.Supplier.OnPickup then
-                Matrix.Supplier.OnPickup({ kind = 'bot', id = botId }, drop.id, nil)
+                pcall(Matrix.Supplier.OnPickup, { kind = 'bot', id = botId }, drop.id, nil)
             end
 
         elseif reason == 'busted' then
@@ -763,18 +856,18 @@ function Matrix.CompleteDispatch(botId, reason)
             local nearestId = FindNearestTrapHouse(dispatch.last_coords or dispatch.destination)
             if nearestId then
                 if Matrix.Kitchen and Matrix.Kitchen.OnCaptured then
-                    Matrix.Kitchen.OnCaptured(botId, nearestId)
+                    pcall(Matrix.Kitchen.OnCaptured, botId, nearestId)
                 end
             end
             if Matrix.Logistics and Matrix.Logistics.OnDealerEliminated then
-                Matrix.Logistics.OnDealerEliminated(botId, 'police_busted')
+                pcall(Matrix.Logistics.OnDealerEliminated, botId, 'police_busted')
             end
         end
     end
 
     -- Aktif araç kilidini serbest bırak
     if dispatch.plate and Matrix.Logistics and Matrix.Logistics.ReleaseVehicleLock then
-        Matrix.Logistics.ReleaseVehicleLock(dispatch.plate)
+        pcall(Matrix.Logistics.ReleaseVehicleLock, dispatch.plate)
     end
 
     Matrix.DespawnDispatchEntity(botId)
@@ -819,9 +912,15 @@ local function FlushPendingEvents(dispatch)
     dispatch.pending_events = {}
 end
 
+-- [H2] FIFO cap: pending_events PENDING_EVENTS_MAX'ı aşarsa en eski mesaj
+-- atılır (kör bölgede sınırsız RAM büyümesi engellenir).
 local function QueueOrEmit(dispatch, message)
     if dispatch.comms_lost then
-        dispatch.pending_events[#dispatch.pending_events + 1] = message
+        local events = dispatch.pending_events
+        if #events >= PENDING_EVENTS_MAX then
+            table.remove(events, 1)
+        end
+        events[#events + 1] = message
     else
         Matrix.Log('CORE', message)
     end
@@ -830,12 +929,19 @@ end
 --- Master ticker tarafından 1.000 ms'de bir çağrılır.
 --- Yoldaki her fiziksel dispatch'ın GERÇEK dünya pozisyonunu okur ve
 --- polis / ALPR / kör bölge etkileşimlerini dinamik olarak işler.
+--- [H3] İKİ FAZLI: Faz 1 salt-okunur gezinir ve tamamlanacakları toplar;
+--- Faz 2 (iterasyon bittikten SONRA) bu tamamlamaları uygular. Bu, "ne
+--- yapılacağına karar verme" ile "yapma" adımlarını ayrıştırarak okunurluğu
+--- ve ek güvenlik payını artırır (Lua'da pairs() sırasında MEVCUT bir
+--- anahtarı nil'e ayarlamak zaten tanımlı/güvenli davranıştır, dolayısıyla
+--- bu bir "kırık davranış düzeltmesi" değil, bilinçli bir sağlamlaştırmadır).
 function Matrix.TickPhysicalDispatches()
+    local toComplete = {}   -- [botId] = reason (Faz 2'de uygulanır)
+
     for botId, dispatch in pairs(Matrix.Dispatches) do
         local bot = Matrix.Bots[botId]
         if not bot then
-            Matrix.DespawnDispatchEntity(botId)
-            Matrix.Dispatches[botId] = nil
+            toComplete[botId] = 'failed'
         else
             dispatch.elapsed = dispatch.elapsed + 1.0
             dispatch.task_retry_ticks = dispatch.task_retry_ticks + 1
@@ -844,7 +950,7 @@ function Matrix.TickPhysicalDispatches()
             if not ped or ped == 0 or not DoesEntityExist(ped) then
                 -- Fiziksel varlık kayıp (sunucu restart, crash) → iptal
                 Matrix.Log('CORE', '[SEVK KAYIP] Bot #%d fiziksel varlık bulunamadı, iptal.', botId)
-                Matrix.CompleteDispatch(botId, 'failed')
+                toComplete[botId] = 'failed'
             else
                 local coordsRaw = GetEntityCoords(ped)
                 local coords    = vector3(coordsRaw.x, coordsRaw.y, coordsRaw.z)
@@ -856,7 +962,7 @@ function Matrix.TickPhysicalDispatches()
                 -- =====================================================
                 local distToDest = #(coords - dispatch.destination)
                 if distToDest <= DISPATCH_ARRIVAL_RADIUS_M then
-                    Matrix.CompleteDispatch(botId, 'arrived')
+                    toComplete[botId] = 'arrived'
                 else
                     -- ================================================
                     -- KÖR BÖLGE (yalnızca telemetri gecikir; gözetim sürer)
@@ -873,7 +979,10 @@ function Matrix.TickPhysicalDispatches()
                         dispatch.comms_lost = false
                         Matrix.Log('CORE', '[SİNYAL YENİDEN ALINDI] Bot #%d kör bölgeden çıktı.', botId)
                         SetTimeout(Config.Logistics.DeadZoneLogFlushDelayMs, function()
-                            FlushPendingEvents(dispatch)
+                            -- Dispatch bu arada tamamlanmış olabilir → guard.
+                            if Matrix.Dispatches[botId] == dispatch then
+                                FlushPendingEvents(dispatch)
+                            end
                         end)
                     end
 
@@ -916,7 +1025,7 @@ function Matrix.TickPhysicalDispatches()
 
                     if dispatch.police_dwell >= DISPATCH_BUSTED_DWELL_TICKS then
                         Matrix.Log('CORE', '[PUSU] Bot #%d polis tarafından kuşatıldı.', botId)
-                        Matrix.CompleteDispatch(botId, 'busted')
+                        toComplete[botId] = 'busted'
                     else
                         -- ============================================
                         -- ALPR / EŞKAL LOGLAMA (trap house başına bir kez)
@@ -928,7 +1037,7 @@ function Matrix.TickPhysicalDispatches()
                                         dispatch.alpr_logged_traps[trapId] = true
                                         local veh = Matrix.Fleet and Matrix.Fleet.GetVehicle and Matrix.Fleet.GetVehicle(dispatch.plate)
                                         if veh then
-                                            Matrix.Fleet.RecordAlprHit(dispatch.plate, bot.dna_id,
+                                            pcall(Matrix.Fleet.RecordAlprHit, dispatch.plate, bot.dna_id,
                                                 veh.registered_by_citizenid, trapId)
 
                                             local vinMult = Config.Logistics.Fleet.VinDecryptionMultiplier[veh.vin_status] or 1.0
@@ -976,6 +1085,11 @@ function Matrix.TickPhysicalDispatches()
             end
         end
     end
+
+    -- Faz 2: iterasyon BİTTİ, şimdi tamamlamaları uygula.
+    for botId, reason in pairs(toComplete) do
+        pcall(Matrix.CompleteDispatch, botId, reason)
+    end
 end
 
 -- =====================================================================
@@ -996,16 +1110,20 @@ CreateThread(function()
         bureauAccumulator = bureauAccumulator + 1
 
         -- (1) Bot biyolojik döngüler
+        -- [H6] pcall: TEK bir botun formülünde beklenmedik hata olsa bile
+        -- diğer botlar ve ticker'ın kendisi etkilenmez.
         for _, bot in pairs(Matrix.Bots) do
             if bot.status == 'active' then
                 local s = bot.state.elapsed_seconds + 1
                 bot.state.elapsed_seconds = s
 
                 if s % secPerMin == 0 then
-                    Matrix.Kitchen.ProcessMinuteCycle(bot)
+                    local ok, err = pcall(Matrix.Kitchen.ProcessMinuteCycle, bot)
+                    if not ok then Matrix.Log('CORE', '[HATA] ProcessMinuteCycle (Bot #%d) basarisiz: %s', bot.id, tostring(err)) end
                 end
                 if s % secPerHour == 0 then
-                    Matrix.Kitchen.ProcessHourCycle(bot)
+                    local ok, err = pcall(Matrix.Kitchen.ProcessHourCycle, bot)
+                    if not ok then Matrix.Log('CORE', '[HATA] ProcessHourCycle (Bot #%d) basarisiz: %s', bot.id, tostring(err)) end
                 end
             end
         end
@@ -1021,16 +1139,27 @@ CreateThread(function()
             end
         end
 
-        -- (3) FİZİKSEL SEVK TAKİBİ  ★ yeni ★
-        Matrix.TickPhysicalDispatches()
+        -- (3) FİZİKSEL SEVK TAKİBİ
+        local ok3, err3 = pcall(Matrix.TickPhysicalDispatches)
+        if not ok3 then Matrix.Log('CORE', '[HATA] TickPhysicalDispatches basarisiz (yutuldu): %s', tostring(err3)) end
 
         -- (4) Büro örüntü analizi
         if bureauAccumulator >= bureauInterval then
             bureauAccumulator = 0
-            Matrix.Bureau.Tick()
+            local ok4, err4 = pcall(Matrix.Bureau.Tick)
+            if not ok4 then Matrix.Log('CORE', '[HATA] Bureau.Tick basarisiz (yutuldu): %s', tostring(err4)) end
             CreateThread(function()
-                Matrix.Recruitment.ScanCustomerPool()
+                local okS, errS = pcall(Matrix.Recruitment.ScanCustomerPool)
+                if not okS then Matrix.Log('CORE', '[HATA] ScanCustomerPool basarisiz (yutuldu): %s', tostring(errS)) end
             end)
+        end
+
+        -- (5) ★ KATMAN 5: Taktik HUD anlık görüntü push — SADECE HUD açık
+        -- oyunculara, AYNI 1000ms saatten (ayrı bir thread AÇILMAZ). Hook
+        -- yoksa (market.lua yüklü değilse) tamamen no-op.
+        if Matrix.Hud and Matrix.Hud.PushSnapshots then
+            local ok5, err5 = pcall(Matrix.Hud.PushSnapshots)
+            if not ok5 then Matrix.Log('CORE', '[HATA] Hud.PushSnapshots basarisiz (yutuldu): %s', tostring(err5)) end
         end
     end
 end)
@@ -1066,25 +1195,39 @@ AddEventHandler('onResourceStop', function(resourceName)
 end)
 
 -- =====================================================================
--- PLAYER DROP CLEANUP
+-- [H4] PLAYER DROP CLEANUP (genişletilmiş süpürme)
 -- =====================================================================
 AddEventHandler('playerDropped', function()
     local src = source
     local citizenid = Matrix.PlayerSourceIndex[src]
-    if not citizenid then return end
 
-    local state = Matrix.PlayerState[citizenid]
-    if state then
-        MySQL.prepare([[
-            INSERT INTO matrix_player_state (citizenid, cortisol_level, fatigue_level, updated_at)
-            VALUES (?, ?, ?, NOW())
-            ON DUPLICATE KEY UPDATE cortisol_level = VALUES(cortisol_level),
-                fatigue_level = VALUES(fatigue_level), updated_at = NOW()
-        ]], { citizenid, state.biology.cortisol_level, state.biology.fatigue_level })
+    if citizenid then
+        local state = Matrix.PlayerState[citizenid]
+        if state then
+            MySQL.prepare([[
+                INSERT INTO matrix_player_state (citizenid, cortisol_level, fatigue_level, updated_at)
+                VALUES (?, ?, ?, NOW())
+                ON DUPLICATE KEY UPDATE cortisol_level = VALUES(cortisol_level),
+                    fatigue_level = VALUES(fatigue_level), updated_at = NOW()
+            ]], { citizenid, state.biology.cortisol_level, state.biology.fatigue_level })
 
-        Matrix.PlayerState[citizenid] = nil
+            Matrix.PlayerState[citizenid] = nil
+        end
     end
     Matrix.PlayerSourceIndex[src] = nil
+
+    -- Bu oyuncunun dispatcher_src olarak atandığı TÜM aktif dispatch'ler:
+    -- bot KOŞMAYA DEVAM EDER (sunucu-tarafında tick'leniyor), sadece
+    -- telsiz bağı kopar → dispatcher_src=nil, comms_lost=true. Böylece
+    -- (a) FiveM'in yeniden kullandığı src ID'leri ile yanlış oyuncuya
+    -- telsiz statiği gitmesi engellenir, (b) dispatch orphaned bir
+    -- dispatcher referansı tutmaz.
+    for _, dispatch in pairs(Matrix.Dispatches) do
+        if dispatch.dispatcher_src == src then
+            dispatch.dispatcher_src = nil
+            dispatch.comms_lost = true
+        end
+    end
 end)
 
 -- =====================================================================
@@ -1308,18 +1451,19 @@ RegisterCommand('matrixdump', function(src)
     Reply(src, ('--- Toplam %d bot ---'):format(count))
 end, false)
 
--- ★ Fiziksel sevk durum komutu (yeni)
+-- ★ Fiziksel sevk durum komutu
 RegisterCommand('fizikselsevk', function(src, args)
     local count = 0
     for botId, d in pairs(Matrix.Dispatches) do
         count = count + 1
         local lc = d.last_coords or d.origin
-        Reply(src, ('Bot #%d [%s] Plaka:%s Konum:(%.1f,%.1f,%.1f) Hedef-Mesafe:%.1fm Sinyal:%s Polis-Dwell:%d'):format(
+        Reply(src, ('Bot #%d [%s] Plaka:%s Konum:(%.1f,%.1f,%.1f) Hedef-Mesafe:%.1fm Sinyal:%s Polis-Dwell:%d Bekleyen:%d'):format(
             botId, d.vehicle_type, tostring(d.plate),
             lc.x, lc.y, lc.z,
             #(lc - d.destination),
             d.comms_lost and 'KESİK' or 'VAR',
-            d.police_dwell))
+            d.police_dwell,
+            #d.pending_events))
     end
     Reply(src, ('--- Toplam %d fiziksel dispatch ---'):format(count))
 end, false)

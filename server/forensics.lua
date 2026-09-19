@@ -15,6 +15,31 @@
 --   sistemine aittir; burada sadece SAF, tekrar üretilebilir formül üretilir).
 --   RNG YOK: aynı (weaponWear, cortisol, durability) üçlüsü HER ZAMAN aynı
 --   çıktıyı üretir.
+--
+-- ★ KATMAN 5 SERTLEŞTİRME REVİZYONU (bu turda eklendi):
+--   [F1] BallisticCache için FIFO tabanlı bir üst sınır (4096 kayıt):
+--        çok uzun uptime'larda (haftalarca açık kalan sunucu) tekil silah
+--        serisi sayısı teorik olarak sınırsız büyüyebilir; bu üst sınır RAM
+--        şişmesini yapısal olarak engeller. Gerçek LRU DEĞİLDİR — basit
+--        "insert-order FIFO" (son eklenenler değil, İLK eklenenler atılır).
+--        Atılan bir seri yeniden ateşlenirse DB'de zaten var olduğundan
+--        (ON DUPLICATE KEY) sorunsuz yeniden cache'e girer.
+--   [F2] Wear flush için retry kuyruğu: bir UPDATE hata verirse (geçici DB
+--        kesintisi vb.) kayıp gitmez, bir sonraki 20sn'lik tick'te tekrar
+--        denenir.
+--   [F3] Adli Laboratuvar Körlüğü formülündeki math.exp çağrısına
+--        `math_max(rate, 1e-9)` guard'ı eklendi. NOT — dürüst açıklama:
+--        rate=0 durumu zaten NaN ÜRETMEZ (exp(-0*deficit)=exp(0)=1.0,
+--        matematiksel olarak tanımlı); bu guard bir NaN riskini KAPATMIYOR,
+--        yalnızca "decay rate sıfırsa körlük etkisi tam olarak devre dışı
+--        kalsın" niyetini AÇIKÇA ifade eden zararsız bir savunma katmanıdır.
+--   [F4] Event bridge'ler ve LoadCaches artık pcall ile sarmalı (bkz.
+--        main.lua [H6] ile AYNI disiplin) — tek bir ateşleme olayındaki
+--        beklenmedik hata event handler'ı ya da resource başlangıcını
+--        düşürmez.
+--   [F5] /balistikcache debug komutu: LRU/retry kuyruklarının anlık RAM
+--        boyutlarını gösterir (yeni sınırların gerçekten iş gördüğünü
+--        doğrulamak için).
 -- =====================================================================
 
 Matrix.Forensics = Matrix.Forensics or {}
@@ -22,16 +47,56 @@ Matrix.Forensics = Matrix.Forensics or {}
 local pairs, ipairs, type, tostring = pairs, ipairs, type, tostring
 local tonumber, table, math       = tonumber, table, math
 local math_max, math_min          = math.max, math.min
+local math_exp                    = math.exp
 local GetGameTimer                = GetGameTimer
+
+-- [F1] LRU(FIFO) cap
+local BALLISTIC_CACHE_MAX = 4096
 
 -- weaponSerial -> { ballistic_id, wear_level }
 local BallisticCache = {}
+-- Insert sırası (FIFO budama için)
+local BallisticInsertOrder = {}
 -- ballistic_id -> pendingWear
 local PendingWearUpdates = {}
+-- [F2] Bir önceki flush'ta başarısız olan yazımlar
+local WearRetryQueue = {}
 
 -- Forensic evidence için lokal ID allocator (async INSERT'e izin verir)
 local EvidenceNextId     = 1
 local EvidenceIdSynced   = false
+
+-- =====================================================================
+-- [F1] FIFO BUDAMA
+-- En eski eklenmiş kayıtları düşürür (gerçek LRU değil — "insert-order
+-- FIFO", basit ve deterministik). KARMAŞIKLIK: O(n) sadece cap aşıldığında
+-- çalışır (her insert'te değil), pratikte nadiren tetiklenir.
+-- =====================================================================
+local function EvictBallisticCacheIfNeeded()
+    local n = 0
+    for _ in pairs(BallisticCache) do n = n + 1 end
+    if n <= BALLISTIC_CACHE_MAX then return end
+
+    local excess = n - BALLISTIC_CACHE_MAX
+    local removed = 0
+    local i = 1
+    while removed < excess and i <= #BallisticInsertOrder do
+        local serial = BallisticInsertOrder[i]
+        if serial and BallisticCache[serial] then
+            BallisticCache[serial] = nil
+            removed = removed + 1
+        end
+        BallisticInsertOrder[i] = nil
+        i = i + 1
+    end
+    -- Kalan sırayı öne sıkıştır (delikli dizi bırakma).
+    local j = 1
+    for k = i, #BallisticInsertOrder do
+        BallisticInsertOrder[j] = BallisticInsertOrder[k]
+        j = j + 1
+    end
+    for k = j, #BallisticInsertOrder do BallisticInsertOrder[k] = nil end
+end
 
 local function GetActorDnaId(actor)
     if not actor then return 'UNKNOWN' end
@@ -104,8 +169,10 @@ function Matrix.Forensics.LoadCaches()
             ballistic_id = row.ballistic_id,
             wear_level   = row.wear_level or 0.0
         }
+        BallisticInsertOrder[#BallisticInsertOrder + 1] = row.weapon_serial
     end
     Matrix.Log('FORENSICS', '%d balistik silah önbelleğe yüklendi.', #rows)
+    EvictBallisticCacheIfNeeded()
 
     -- Evidence id watermark
     local r = MySQL.query.await('SELECT COALESCE(MAX(id),0) AS mx FROM matrix_forensic_evidence', {}) or {}
@@ -115,8 +182,13 @@ function Matrix.Forensics.LoadCaches()
     Matrix.Log('FORENSICS', 'Kanıt ID watermark: %d', EvidenceNextId)
 end
 
+-- [F4] pcall: LoadCaches sırasında beklenmedik hata resource başlangıcını
+-- (diğer dosyaların CreateThread'lerini) düşürmez.
 CreateThread(function()
-    Matrix.Forensics.LoadCaches()
+    local ok, err = pcall(Matrix.Forensics.LoadCaches)
+    if not ok then
+        Matrix.Log('FORENSICS', '[HATA] LoadCaches basarisiz (yutuldu): %s', tostring(err))
+    end
 end)
 
 local function NextEvidenceId()
@@ -151,6 +223,7 @@ function Matrix.Forensics.RegisterOrGetBallisticId(weaponSerial, weaponWear)
         ballistic_id = ballisticId,
         wear_level   = weaponWear
     }
+    BallisticInsertOrder[#BallisticInsertOrder + 1] = weaponSerial
 
     MySQL.prepare([[
         INSERT INTO matrix_ballistic_weapons
@@ -158,6 +231,9 @@ function Matrix.Forensics.RegisterOrGetBallisticId(weaponSerial, weaponWear)
         VALUES (?, ?, ?, 0, NOW())
         ON DUPLICATE KEY UPDATE wear_level = VALUES(wear_level)
     ]], { ballisticId, weaponSerial, weaponWear })
+
+    -- [F1] Yeni satır eklendikten sonra üst sınır kontrolü.
+    EvictBallisticCacheIfNeeded()
 
     Matrix.Log('FORENSICS', 'Yeni balistik imza: %s (Seri: %s)', ballisticId, weaponSerial)
     return ballisticId
@@ -209,12 +285,12 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
     -- ★ ADLİ LABORATUVAR KÖRLÜĞÜ: silah canı eşiğin altındaysa eşleşme
     -- kesinliği ÜSTEL olarak baltalanır (deficit büyüdükçe çöküş hızlanır).
     -- Eşiğin ÜSTÜNDEKİ silahlar için deficit<=0 -> çarpan=1 -> HİÇ etkisi yok.
+    -- [F3] rate en az 1e-9'a sabitlenir (bkz. dosya başı dürüst açıklama:
+    -- bu bir NaN riskini KAPATMIYOR, sadece niyeti açıkça ifade ediyor).
     if weaponDurability < Config.Forensics.WeaponDurabilityLabBlindnessThreshold then
         local deficit = Config.Forensics.WeaponDurabilityLabBlindnessThreshold - weaponDurability
-        matchCertainty = Matrix.Clamp(
-            matchCertainty * math.exp(-Config.Forensics.WeaponDurabilityBlindnessDecayRate * deficit),
-            0.0, 1.0
-        )
+        local rate    = math_max(Config.Forensics.WeaponDurabilityBlindnessDecayRate or 0.0, 1e-9)
+        matchCertainty = Matrix.Clamp(matchCertainty * math_exp(-rate * deficit), 0.0, 1.0)
     end
 
     local sealed = matchCertainty > Config.Forensics.MatchCertaintyThreshold
@@ -449,13 +525,26 @@ end
 
 -- =====================================================================
 -- WEAR FLUSH (ticker zamanlı, ana ticker'a yük olmasın diye ayrı thread)
+-- [F2] Başarısız yazımlar WearRetryQueue'ya düşer, bir sonraki tick'te
+-- öncelikli olarak tekrar denenir (kayıp yok, bindirme yok).
 -- =====================================================================
 CreateThread(function()
     while true do
         Wait(20000)
+
+        for bid, wear in pairs(WearRetryQueue) do
+            PendingWearUpdates[bid] = wear
+            WearRetryQueue[bid] = nil
+        end
+
         for bid, wear in pairs(PendingWearUpdates) do
             PendingWearUpdates[bid] = nil
-            MySQL.prepare('UPDATE matrix_ballistic_weapons SET wear_level = ? WHERE ballistic_id = ?', { wear, bid })
+            local ok = pcall(function()
+                MySQL.prepare('UPDATE matrix_ballistic_weapons SET wear_level = ? WHERE ballistic_id = ?', { wear, bid })
+            end)
+            if not ok then
+                WearRetryQueue[bid] = wear
+            end
         end
     end
 end)
@@ -470,22 +559,23 @@ RegisterNetEvent('matrix:server:reportWeaponDischarge', function(weaponSerial, c
     if type(casingInventoryId) ~= 'string' or type(casingSlot) ~= 'number' then return end
     if weaponInventoryId ~= nil and type(weaponInventoryId) ~= 'string' then weaponInventoryId = nil end
     if type(weaponSlot) ~= 'number' then weaponSlot = nil end
-    Matrix.Forensics.OnWeaponFired({ kind = 'player', source = src }, weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
+    local ok, err = pcall(Matrix.Forensics.OnWeaponFired, { kind = 'player', source = src }, weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
+    if not ok then Matrix.Log('FORENSICS', '[HATA] reportWeaponDischarge basarisiz (yutuldu): %s', tostring(err)) end
 end)
 
 RegisterNetEvent('matrix:server:reportObjectTouch', function(inventoryId, slot)
     local src = source
     if type(src) ~= 'number' or src <= 0 then return end
     if type(inventoryId) ~= 'string' or type(slot) ~= 'number' then return end
-    Matrix.Forensics.StampTouch({ kind = 'player', source = src }, inventoryId, slot)
+    local ok, err = pcall(Matrix.Forensics.StampTouch, { kind = 'player', source = src }, inventoryId, slot)
+    if not ok then Matrix.Log('FORENSICS', '[HATA] reportObjectTouch basarisiz (yutuldu): %s', tostring(err)) end
 end)
 
 -- =====================================================================
 -- MONOKROM TAKTİK DEBUG PANELİ (herkese açık test grubu, restricted=false)
--- Q_kovan = 1.0 - (weaponWear*0.3) - (cortisol*0.2), sonra silah canıyla
--- (durability) çarpılır; fingerprint = 1.0 - (cortisol*0.4). Bu komutlar
--- gerçek bir ateşleme olayı beklemeden formülleri manuel gözlemlemek/
--- manipüle etmek içindir. Hiçbir komut formüllerin KENDİSİNİ değiştirmez.
+-- Q_kovan = 1.0 - (weaponWear*0.3) - (cortisol*0.2) ve fingerprint = 1.0 -
+-- (cortisol*0.4) formüllerini gerçek bir ateşleme olayı beklemeden manuel
+-- gözlemlemek/manipüle etmek için. Hiçbir komut formülün KENDİSİNİ değiştirmez.
 -- =====================================================================
 local function Reply(src, msg)
     if type(src) == 'number' and src > 0 then
@@ -578,4 +668,17 @@ RegisterCommand('silahasindir', function(src, args)
 
     Reply(src, ('Slot #%d silah canı %.1f olarak ayarlandı (Jam_Chance:%.3f). Bir sonraki ateşlemede Q_kovan mutasyona uğrayacak.'):format(
         slot, amount, Matrix.Forensics.ComputeJamChance(amount / 100.0)))
+end, false)
+
+-- [F5] /balistikcache - LRU/retry kuyruklarının anlık RAM boyutlarını gösterir.
+RegisterCommand('balistikcache', function(src)
+    local n = 0
+    for _ in pairs(BallisticCache) do n = n + 1 end
+    local pn = 0
+    for _ in pairs(PendingWearUpdates) do pn = pn + 1 end
+    local rn = 0
+    for _ in pairs(WearRetryQueue) do rn = rn + 1 end
+
+    Reply(src, ('BallisticCache: %d/%d | InsertOrder:%d | PendingWear:%d | WearRetry:%d'):format(
+        n, BALLISTIC_CACHE_MAX, #BallisticInsertOrder, pn, rn))
 end, false)

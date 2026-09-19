@@ -415,3 +415,12 @@ Config.Undercover = {
     SuspicionThreshold      = 0.50,
     ScanIntervalSeconds     = 300
 }
+
+-- =====================================================================
+-- KATMAN 5: SAF METİN TABANLI MONOKROM TAKTİK HUD (client/hud.lua)
+-- Veri, server'ın zaten dönen 1000ms master ticker'ından push edilir
+-- (Config.Tick.IntervalMs) — ayrı bir server-side thread AÇILMAZ.
+-- =====================================================================
+Config.Hud = {
+    ToggleKey = 'F6'
+}
