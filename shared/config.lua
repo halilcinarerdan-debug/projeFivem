@@ -91,3 +91,12 @@ Config.Player = {
     DefaultResilience = 0.5,
     DefaultSkillChemistry = 0.4
 }
+
+-- Katman 1: Rol -> ped modeli eslesmesi (saha ayrimi icin, /botyarat rol parametresine gore secilir)
+Config.RoleModels = {
+    dealer = 's_m_y_dealer_01',
+    runner = 'a_m_y_runner_01',
+    lookout = 'a_m_y_skater_01',
+    cooking = 's_m_m_chemsec_01'
+}
+Config.DefaultRoleModel = 's_m_y_dealer_01'

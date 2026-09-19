@@ -225,7 +225,6 @@ local function LoadBotsFromDatabase()
     Matrix.Log('CORE', '%d bot matristen belleğe yüklendi.', #rows)
 end
 
-local MATRIX_DEALER_MODEL = 's_m_y_dealer_01'
 local MATRIX_PED_INJECTION_MAX_TICKS = 50
 
 function Matrix.SpawnBot(id, coords)
@@ -240,7 +239,8 @@ function Matrix.SpawnBot(id, coords)
         return false
     end
 
-    local modelHash = GetHashKey(MATRIX_DEALER_MODEL)
+    local modelName = Config.RoleModels[bot.role] or Config.DefaultRoleModel
+    local modelHash = GetHashKey(modelName)
     local heading = coords.w or 0.0
 
     local ped = CreatePed(4, modelHash, coords.x, coords.y, coords.z, heading, true, false)
@@ -264,7 +264,10 @@ function Matrix.SpawnBot(id, coords)
     bot.state.coords = vector3(coords.x, coords.y, coords.z)
 
     TriggerClientEvent('matrix:client:injectBot', -1, id, bot.role, coords, bot.dna_id, netId)
-    Matrix.Log('CORE', 'Bot #%d dünyaya enjekte edildi (%.1f, %.1f, %.1f) NetID:%d', id, coords.x, coords.y, coords.z, netId)
+    Matrix.Log(
+        'CORE', 'Bot #%d dünyaya enjekte edildi [%s -> %s] (%.1f, %.1f, %.1f) NetID:%d',
+        id, bot.role, modelName, coords.x, coords.y, coords.z, netId
+    )
     return true, netId
 end
 
