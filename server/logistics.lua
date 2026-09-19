@@ -1,6 +1,7 @@
 -- =====================================================================
 -- MATRIX LOGISTICS / logistics.lua
--- Katman 4: Programli Lojistik Sevk & Zaman-Mesafe Surtunme Motoru.
+-- Katman 4: Programli Lojistik Sevk & Zaman-Mesafe Surtunme Motoru +
+-- Illegal Filo Tedarik ve Atama Motoru.
 -- Sealed Katman 1-2-3 dosyalarina (main/forensics/recruitment/bureau/
 -- kitchen) dokunmadan, onlarin dirty-set / async-prepare desenini
 -- taklit ederek Matrix.* omurgasina kenetlenir. RNG yok, HUD yok;
@@ -8,6 +9,7 @@
 -- =====================================================================
 
 Matrix.Logistics = Matrix.Logistics or {}
+Matrix.Fleet      = Matrix.Fleet      or {}
 
 local pairs, ipairs, type, tostring = pairs, ipairs, type, tostring
 local tonumber, table, math         = tonumber, table, math
@@ -28,6 +30,14 @@ local source                        = source
 
 -- botId -> dispatch record
 local ActiveDispatches = {}
+
+-- plate -> { plate, vehicle_class, vin_status, vehicle_wear,
+--            registered_by_citizenid, assigned_bot_id, assignment_mode }
+local FleetVehicles = {}
+-- botId -> plate (kalıcı atama, hızlı ters bakış)
+local PermanentVehicleByBot = {}
+-- plate -> botId (o an aktif bir sevkiyatta kullanılıyor; çift atamayı önler)
+local ActiveVehicleLocks = {}
 
 -- =====================================================================
 -- UTILITIES
@@ -54,6 +64,34 @@ end
 local function GetVehicleProfile(vehicleType)
     return Config.Logistics.VehicleTypes[vehicleType]
         or Config.Logistics.VehicleTypes[Config.Logistics.DefaultVehicleType]
+end
+
+-- Hedef vektörünü sıkı biçimde doğrular: eksik, bozuk (NaN/inf) veya
+-- origin'e göre menzil dışı ise gerekçesini döndürür.
+local function ValidateDestination(origin, destination)
+    if destination == nil then return false, 'missing_vector' end
+    if type(destination) ~= 'table' and type(destination) ~= 'userdata' then
+        return false, 'corrupt_vector'
+    end
+
+    local x, y, z = destination.x, destination.y, destination.z
+    if type(x) ~= 'number' or type(y) ~= 'number' or type(z) ~= 'number' then
+        return false, 'corrupt_vector'
+    end
+    if x ~= x or y ~= y or z ~= z then return false, 'corrupt_vector' end -- NaN guard
+    if x == math_huge or x == -math_huge or y == math_huge or y == -math_huge
+        or z == math_huge or z == -math_huge then
+        return false, 'corrupt_vector'
+    end
+
+    if origin then
+        local dist = VectorDistance(origin, destination)
+        if dist > Config.Logistics.MaxDispatchRangeMeters then
+            return false, 'out_of_range', dist
+        end
+    end
+
+    return true
 end
 
 -- ox_inventory üzerinden dealer'ın taşıdığı toplam ağırlık (W_total, gram).
@@ -95,7 +133,8 @@ local function FindDeadZone(coords)
 end
 
 -- =====================================================================
--- KÖR BÖLGE / GECİKMELİ LOG KUYRUĞU
+-- KÖR BÖLGE / GECİKMELİ LOG KUYRUĞU (yalnızca oyuncu-panel telemetrisini
+-- geciktirir; Büro'nun fiziksel tespitleri -aşağıda- bundan etkilenmez)
 -- =====================================================================
 local function QueueOrEmit(dispatch, message)
     if dispatch.comms_lost then
@@ -117,13 +156,185 @@ local function FlushPendingEvents(dispatch)
 end
 
 -- =====================================================================
+-- ILLEGAL FİLO: YÜKLEME
+-- =====================================================================
+function Matrix.Fleet.LoadFleet()
+    local rows = MySQL.query.await('SELECT * FROM matrix_fleet', {}) or {}
+    for _, row in ipairs(rows) do
+        FleetVehicles[row.plate] = {
+            plate                   = row.plate,
+            vehicle_class           = row.vehicle_class,
+            vin_status              = row.vin_status,
+            vehicle_wear            = tonumber(row.vehicle_wear) or 0.0,
+            registered_by_citizenid = row.registered_by_citizenid,
+            assigned_bot_id         = row.assigned_bot_id,
+            assignment_mode         = row.assignment_mode
+        }
+        if row.assigned_bot_id and row.assignment_mode == 'permanent' then
+            PermanentVehicleByBot[row.assigned_bot_id] = row.plate
+        end
+    end
+    Matrix.Log('LOGISTICS', '%d illegal araç filoya yüklendi.', #rows)
+end
+
+CreateThread(function()
+    Matrix.Fleet.LoadFleet()
+end)
+
+-- =====================================================================
+-- ILLEGAL FİLO: KAYIT / ATAMA
+-- =====================================================================
+function Matrix.Fleet.GetVehicle(plate)
+    if type(plate) ~= 'string' then return nil end
+    return FleetVehicles[plate]
+end
+
+function Matrix.Fleet.RegisterVehicle(citizenid, plate, vehicleClass, vinStatus, vehicleWear)
+    if type(plate) ~= 'string' or plate == '' or #plate > 32 then return false, 'bad_plate' end
+    if FleetVehicles[plate] then return false, 'plate_exists' end
+
+    vehicleClass = (vehicleClass == 'motorbike' or vehicleClass == 'car')
+        and vehicleClass or Config.Logistics.Fleet.DefaultVehicleClass
+    vinStatus = (vinStatus == 'factory' or vinStatus == 'scratched' or vinStatus == 'hot')
+        and vinStatus or Config.Logistics.Fleet.DefaultVinStatus
+    vehicleWear = Matrix.Clamp(tonumber(vehicleWear) or 0.0, 0.0, 1.0)
+
+    FleetVehicles[plate] = {
+        plate                   = plate,
+        vehicle_class           = vehicleClass,
+        vin_status              = vinStatus,
+        vehicle_wear            = vehicleWear,
+        registered_by_citizenid = citizenid,
+        assigned_bot_id         = nil,
+        assignment_mode         = nil
+    }
+
+    MySQL.prepare([[
+        INSERT INTO matrix_fleet (plate, vehicle_class, vin_status, vehicle_wear, registered_by_citizenid, created_at)
+        VALUES (?, ?, ?, ?, ?, NOW())
+    ]], { plate, vehicleClass, vinStatus, vehicleWear, citizenid })
+
+    Matrix.Log('LOGISTICS', 'İllegal araç filoya kaydedildi: %s [%s/%s] aşınma=%.2f (sahip:%s)',
+        plate, vehicleClass, vinStatus, vehicleWear, tostring(citizenid))
+    return true
+end
+
+function Matrix.Fleet.AssignPermanent(plate, botId)
+    local vehicle = FleetVehicles[plate]
+    if not vehicle then return false, 'vehicle_not_found' end
+
+    local bot = Matrix.Bots[botId]
+    if not bot then return false, 'bot_missing' end
+
+    if vehicle.assigned_bot_id and vehicle.assigned_bot_id ~= botId then
+        return false, 'vehicle_assigned_elsewhere'
+    end
+    if PermanentVehicleByBot[botId] and PermanentVehicleByBot[botId] ~= plate then
+        return false, 'bot_already_has_vehicle'
+    end
+
+    vehicle.assigned_bot_id = botId
+    vehicle.assignment_mode = 'permanent'
+    PermanentVehicleByBot[botId] = plate
+
+    MySQL.prepare('UPDATE matrix_fleet SET assigned_bot_id = ?, assignment_mode = ? WHERE plate = ?',
+        { botId, 'permanent', plate })
+
+    Matrix.Log('LOGISTICS', 'Araç %s -> Bot #%d (%s) kalıcı olarak atandı.', plate, botId, bot.name)
+    return true
+end
+
+function Matrix.Fleet.UnassignPermanent(plate)
+    local vehicle = FleetVehicles[plate]
+    if not vehicle or not vehicle.assigned_bot_id then return false end
+
+    PermanentVehicleByBot[vehicle.assigned_bot_id] = nil
+    vehicle.assigned_bot_id = nil
+    vehicle.assignment_mode = nil
+
+    MySQL.prepare('UPDATE matrix_fleet SET assigned_bot_id = NULL, assignment_mode = NULL WHERE plate = ?', { plate })
+
+    Matrix.Log('LOGISTICS', 'Araç %s serbest bırakıldı (kalıcı atama kaldırıldı).', plate)
+    return true
+end
+
+function Matrix.Fleet.RecordAlprHit(plate, dnaId, organizationSignature, trapHouseId)
+    MySQL.prepare([[
+        INSERT INTO matrix_alpr_hits (plate, fingerprint_dna_id, organization_signature, trap_house_id, created_at)
+        VALUES (?, ?, ?, ?, NOW())
+    ]], { plate, dnaId or 'UNKNOWN', organizationSignature or 'UNKNOWN', trapHouseId })
+end
+
+-- Araç çatışmada/baskında polis çemberinde kalırsa: filodan hard-delete,
+-- adli laboratuvarda kalıcı bir kanıt katsayısı olarak mühürlenir.
+function Matrix.Fleet.SeizeVehicle(plate, cause, dnaId, coords)
+    local vehicle = FleetVehicles[plate]
+    if not vehicle then return false end
+
+    local certainty = Config.Logistics.Fleet.SeizureSealCertainty[vehicle.vin_status]
+        or Config.Logistics.Fleet.SeizureSealCertainty[Config.Logistics.Fleet.DefaultVinStatus]
+
+    local cx, cy, cz = 0.0, 0.0, 0.0
+    if IsValidCoords(coords) then cx, cy, cz = coords.x, coords.y, coords.z end
+
+    MySQL.prepare([[
+        INSERT INTO matrix_vehicle_seizures (
+            plate, vin_status, vehicle_wear, fingerprint_dna_id, organization_signature,
+            seizure_cause, seal_certainty, coords_x, coords_y, coords_z, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    ]], {
+        plate, vehicle.vin_status, vehicle.vehicle_wear, dnaId or 'UNKNOWN',
+        vehicle.registered_by_citizenid or 'UNKNOWN', cause or 'unknown', certainty, cx, cy, cz
+    })
+
+    local deletedOk = pcall(function()
+        MySQL.query.await('DELETE FROM matrix_fleet WHERE plate = ?', { plate })
+    end)
+
+    if vehicle.assigned_bot_id then PermanentVehicleByBot[vehicle.assigned_bot_id] = nil end
+    ActiveVehicleLocks[plate] = nil
+    FleetVehicles[plate] = nil
+
+    Matrix.Log('LOGISTICS', '[FİLO KAYIP: %s MÜHÜRLENDİ VE FİLODAN SİLİNDİ] Sebep:%s | VIN:%s | Mühür-Kesinlik:%.2f | SQL Silindi:%s',
+        plate, tostring(cause or 'unknown'), vehicle.vin_status, certainty, tostring(deletedOk))
+
+    return true
+end
+
+-- Bir bot bağlamı olmadan (örn. baskında bulunan boş araç) doğrudan tetiklenebilen giriş noktası.
+function Matrix.Logistics.OnVehicleEncircled(plate, cause)
+    local vehicle = Matrix.Fleet.GetVehicle(plate)
+    if not vehicle then return false end
+
+    local usingBotId = ActiveVehicleLocks[plate] or vehicle.assigned_bot_id
+    local bot = usingBotId and Matrix.Bots[usingBotId]
+
+    local dnaId, coords = 'UNKNOWN', nil
+    if bot then
+        dnaId = bot.dna_id
+        local dispatch = ActiveDispatches[usingBotId]
+        coords = (dispatch and dispatch.last_coords) or bot.state.coords
+    end
+
+    return Matrix.Fleet.SeizeVehicle(plate, cause or 'police_encirclement', dnaId, coords)
+end
+
+-- =====================================================================
 -- KALICI ÖLÜM (PERMADEATH & HARD-DELETE)
 -- =====================================================================
 function Matrix.Logistics.OnDealerEliminated(botId, cause)
     local bot = Matrix.Bots[botId]
     if not bot then return false end
 
-    ActiveDispatches[botId] = nil
+    local dispatch = ActiveDispatches[botId]
+    local plateToSeize = (dispatch and dispatch.plate) or PermanentVehicleByBot[botId]
+    local lastCoords = (dispatch and dispatch.last_coords) or bot.state.coords
+    local dnaId = bot.dna_id
+
+    if dispatch then
+        if dispatch.plate then ActiveVehicleLocks[dispatch.plate] = nil end
+        ActiveDispatches[botId] = nil
+    end
 
     if bot.state.spawned then
         Matrix.DespawnBot(botId)
@@ -138,6 +349,10 @@ function Matrix.Logistics.OnDealerEliminated(botId, cause)
 
     Matrix.Log('LOGISTICS', '[LOJİSTİK KAYIP: DEALER_ID %d KALICI OLARAK DE-REGİSTRE EDİLDİ] Sebep:%s | SQL Silindi:%s',
         botId, tostring(cause or 'unknown'), tostring(deletedOk))
+
+    if plateToSeize then
+        Matrix.Fleet.SeizeVehicle(plateToSeize, cause, dnaId, lastCoords)
+    end
 
     return true
 end
@@ -177,9 +392,9 @@ function Matrix.Logistics.OnPoliceCollision(botId)
 end
 
 -- =====================================================================
--- DEALER SEVK (ETA hesaplayıcı)
+-- DEALER SEVK (ETA hesaplayıcı + Filo entegrasyonu)
 -- =====================================================================
-function Matrix.Logistics.DispatchDealer(botId, destination, vehicleType, dispatcherSrc)
+function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatcherSrc)
     botId = tonumber(botId)
     if not botId then return false, 'bad_bot_id' end
 
@@ -187,45 +402,91 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleType, dispat
     if not bot then return false, 'bot_missing' end
     if bot.role ~= 'dealer' then return false, 'not_a_dealer' end
     if ActiveDispatches[botId] then return false, 'already_dispatched' end
-    if not IsValidCoords(destination) then return false, 'bad_destination' end
 
     local origin = bot.state.coords
     if not IsValidCoords(origin) then return false, 'no_origin' end
 
-    if type(vehicleType) ~= 'string' or not Config.Logistics.VehicleTypes[vehicleType] then
-        vehicleType = Config.Logistics.DefaultVehicleType
+    local destOk, destReason, destExtra = ValidateDestination(origin, destination)
+    if not destOk then
+        Matrix.Log('LOGISTICS',
+            '[LOJİSTİK HATA: GEÇERSİZ HEDEF VEKTÖRÜ] Bot #%d sevk reddedildi. Sebep:%s | x=%s y=%s z=%s%s',
+            botId, destReason,
+            tostring(destination and destination.x), tostring(destination and destination.y), tostring(destination and destination.z),
+            destExtra and (' | Mesafe:%.1fm (Limit:%.1fm)'):format(destExtra, Config.Logistics.MaxDispatchRangeMeters) or '')
+        return false, destReason
     end
+
+    -- Araç referansı çözümü: artık soyut 'car'/'motorbike' string'i kabul
+    -- edilmez (oyuncu somut bir filo plakası seçer). nil/'' -> botun kalıcı
+    -- aracı varsa o, yoksa yaya; 'foot' -> açıkça yaya; başka her şey plaka.
+    local plate, vehicle, vehicleType, assignmentMode = nil, nil, nil, nil
+
+    if vehicleRef == nil or vehicleRef == '' then
+        plate = PermanentVehicleByBot[botId]
+    elseif vehicleRef ~= 'foot' then
+        plate = vehicleRef
+    end
+
+    if plate then
+        vehicle = Matrix.Fleet.GetVehicle(plate)
+        if not vehicle then return false, 'vehicle_not_found' end
+        if vehicle.assigned_bot_id and vehicle.assigned_bot_id ~= botId then
+            return false, 'vehicle_assigned_elsewhere'
+        end
+        if ActiveVehicleLocks[plate] and ActiveVehicleLocks[plate] ~= botId then
+            return false, 'vehicle_in_use'
+        end
+
+        vehicleType    = vehicle.vehicle_class
+        assignmentMode = (vehicle.assigned_bot_id == botId) and 'permanent' or 'temporary'
+        ActiveVehicleLocks[plate] = botId
+    else
+        vehicleType = 'foot'
+    end
+
     local profile = GetVehicleProfile(vehicleType)
+    local wearBonus = vehicle and (1.0 + (vehicle.vehicle_wear * Config.Logistics.Fleet.WearFrictionBonus)) or 1.0
+    local effectiveFriction = profile.FrictionMultiplier * wearBonus
 
-    local distance   = VectorDistance(origin, destination)
+    local distance    = VectorDistance(origin, destination)
     local weightTotal = GetBotInventoryWeight(bot)
-    local baseSpeed   = Config.Logistics.BaseSpeedUnitsPerSecond
+    local baseSpeed    = Config.Logistics.BaseSpeedUnitsPerSecond
 
-    -- ETA = (Mesafe / (BaseSpeed * Hiz_Katsayisi)) * (1 + (W_total * k) * Surtunme_Carpani)
+    -- ETA = (Mesafe / (BaseSpeed * Hiz_Katsayisi)) * (1 + (W_total * k) * Etkin_Surtunme)
     local etaSeconds = (distance / (baseSpeed * profile.SpeedCoefficient))
-        * (1.0 + (weightTotal * Config.Logistics.WeightFrictionCoefficient) * profile.FrictionMultiplier)
+        * (1.0 + (weightTotal * Config.Logistics.WeightFrictionCoefficient) * effectiveFriction)
     etaSeconds = Matrix.Clamp(etaSeconds, 0.0, math_huge)
 
     ActiveDispatches[botId] = {
-        bot_id         = botId,
-        vehicle_type   = vehicleType,
-        origin         = origin,
-        destination    = destination,
-        eta_total      = etaSeconds,
-        eta_remaining  = etaSeconds,
-        weight_total   = weightTotal,
-        dispatcher_src = dispatcherSrc,
-        comms_lost     = false,
-        pending_events = {},
-        combat_damage  = 0.0,
-        started_at     = Matrix.Now()
+        bot_id              = botId,
+        vehicle_type        = vehicleType,
+        plate               = plate,
+        assignment_mode     = assignmentMode,
+        origin              = origin,
+        destination         = destination,
+        eta_total           = etaSeconds,
+        elapsed             = 0.0,
+        stall_remaining     = 0.0,
+        breakdown_pending   = (vehicle ~= nil) and (vehicle.vehicle_wear >= Config.Logistics.Fleet.BreakdownWearThreshold),
+        breakdown_triggered = false,
+        weight_total        = weightTotal,
+        dispatcher_src       = dispatcherSrc,
+        comms_lost          = false,
+        pending_events      = {},
+        alpr_logged_traps   = {},
+        combat_damage       = 0.0,
+        last_coords         = origin,
+        started_at          = Matrix.Now()
     }
 
     bot.state.activity = 'distribution'
 
     Matrix.Log('LOGISTICS',
-        'Sevkiyat başlatıldı: Bot #%d [%s] Araç:%s Mesafe:%.1fm Ağırlık:%.1fg ETA:%.1fsn',
-        botId, bot.name, vehicleType, distance, weightTotal, etaSeconds)
+        'Sevkiyat başlatıldı: Bot #%d [%s]%s Mesafe:%.1fm Ağırlık:%.1fg Sürtünme-Katsayı:x%.2f ETA:%.1fsn',
+        botId, bot.name,
+        plate and (' Plaka:%s VIN:%s Aşınma:%.2f'):format(plate, vehicle.vin_status, vehicle.vehicle_wear)
+              or (' Araç:%s'):format(vehicleType),
+        distance, weightTotal, wearBonus, etaSeconds)
 
     return true, etaSeconds
 end
@@ -237,18 +498,37 @@ function Matrix.Logistics.Tick()
     for botId, dispatch in pairs(ActiveDispatches) do
         local bot = Matrix.Bots[botId]
         if not bot then
+            if dispatch.plate then ActiveVehicleLocks[dispatch.plate] = nil end
             ActiveDispatches[botId] = nil
         else
-            dispatch.eta_remaining = math_max(dispatch.eta_remaining - 1.0, 0.0)
+            local arrived = false
 
-            local progress = 1.0
-            if dispatch.eta_total > 0.0 then
-                progress = 1.0 - (dispatch.eta_remaining / dispatch.eta_total)
+            if dispatch.stall_remaining > 0.0 then
+                dispatch.stall_remaining = math_max(dispatch.stall_remaining - 1.0, 0.0)
+                QueueOrEmit(dispatch, ('[ARIZA: MEKANİK BEKLEME] Bot #%d aracı (%s) tamir bekliyor (%.0fsn kaldı).'):format(
+                    botId, tostring(dispatch.plate), dispatch.stall_remaining))
+            else
+                dispatch.elapsed = math_min(dispatch.elapsed + 1.0, dispatch.eta_total)
+                local progress = (dispatch.eta_total > 0.0) and (dispatch.elapsed / dispatch.eta_total) or 1.0
+
+                -- Deterministik arıza: wear eşiği geçildiyse yolun ortasında
+                -- (progress >= 0.5) bir kereye mahsus sabit süreli tamir molası.
+                if dispatch.breakdown_pending and not dispatch.breakdown_triggered and progress >= 0.5 then
+                    dispatch.breakdown_triggered = true
+                    dispatch.stall_remaining = Config.Logistics.Fleet.BreakdownStallSeconds
+                    QueueOrEmit(dispatch, ('[ARIZA: MEKANİK RİSK] Bot #%d aracı (%s) yolun ortasında arızalandı, %ds tamir bekleniyor.'):format(
+                        botId, tostring(dispatch.plate), Config.Logistics.Fleet.BreakdownStallSeconds))
+                end
+
+                dispatch.last_coords = LerpCoords(dispatch.origin, dispatch.destination, progress)
+                bot.state.coords = dispatch.last_coords
+
+                if progress >= 1.0 then arrived = true end
             end
 
-            local currentCoords = LerpCoords(dispatch.origin, dispatch.destination, progress)
-            bot.state.coords = currentCoords
+            local currentCoords = dispatch.last_coords or dispatch.origin
 
+            -- Kör bölge tespiti: sadece oyuncu-panel telemetrisini etkiler.
             local zone = FindDeadZone(currentCoords)
             local nowInDeadZone = zone ~= nil
 
@@ -265,25 +545,43 @@ function Matrix.Logistics.Tick()
                 end)
             end
 
-            -- Sinyal varken (kör bölge dışında) sevkiyat en yakın trap house'a
-            -- araç tipine bağlı "Polis Deşifre Çarpanı" oranında istihbarat sızdırır.
+            -- Büro'nun fiziksel ALPR/eşkal takibi oyuncunun telsiz sinyaliyle
+            -- ilgisizdir: kör bölgede de çalışır, sadece bildirimi kuyruklanıp gecikir.
             local profile = GetVehicleProfile(dispatch.vehicle_type)
-            if not dispatch.comms_lost and profile.PoliceDecryptionMultiplier > 0.0 then
+            if profile.PoliceDecryptionMultiplier > 0.0 then
                 local trapHouseId, trapDist = FindNearestTrapHouse(currentCoords)
                 if trapHouseId and trapDist <= Config.Bureau.BaseSearchRadius then
+                    local vehicle = dispatch.plate and Matrix.Fleet.GetVehicle(dispatch.plate) or nil
+                    local vinMultiplier = vehicle
+                        and (Config.Logistics.Fleet.VinDecryptionMultiplier[vehicle.vin_status] or 1.0)
+                        or 1.0
+
                     Matrix.Bureau.AdvanceDecryption(
                         trapHouseId,
-                        Config.Logistics.PoliceDecryptionGainPerTick * profile.PoliceDecryptionMultiplier
+                        Config.Logistics.PoliceDecryptionGainPerTick * profile.PoliceDecryptionMultiplier * vinMultiplier
                     )
+
+                    -- Plaka + dealer DNA + organizasyon imzası bağını trap house
+                    -- başına bir kez kalıcı olarak mühürler (DB spam'ini önler).
+                    if vehicle then
+                        dispatch.alpr_logged_traps[trapHouseId] = dispatch.alpr_logged_traps[trapHouseId] or false
+                        if not dispatch.alpr_logged_traps[trapHouseId] then
+                            dispatch.alpr_logged_traps[trapHouseId] = true
+                            Matrix.Fleet.RecordAlprHit(dispatch.plate, bot.dna_id, vehicle.registered_by_citizenid, trapHouseId)
+                            QueueOrEmit(dispatch, ('[ALPR EŞLEŞMESİ] Plaka %s -> DNA %s -> Org.İmza %s (Trap #%d ile ilişkilendirildi)'):format(
+                                dispatch.plate, bot.dna_id, tostring(vehicle.registered_by_citizenid), trapHouseId))
+                        end
+                    end
                 end
             end
 
             QueueOrEmit(dispatch, ('Bot #%d konum güncellendi: (%.1f, %.1f, %.1f) | Kalan ETA:%.1fsn'):format(
-                botId, currentCoords.x, currentCoords.y, currentCoords.z, dispatch.eta_remaining))
+                botId, currentCoords.x, currentCoords.y, currentCoords.z,
+                math_max(dispatch.eta_total - dispatch.elapsed, 0.0) + dispatch.stall_remaining))
 
-            if dispatch.eta_remaining <= 0.0 then
-                bot.state.coords    = dispatch.destination
-                bot.state.activity  = 'idle'
+            if arrived then
+                bot.state.coords   = dispatch.destination
+                bot.state.activity = 'idle'
 
                 QueueOrEmit(dispatch, ('[VARIŞ NOKTASINDA / AT MEET-POINT] Bot #%d (%s) hedefe ulaştı.'):format(botId, bot.name))
 
@@ -294,6 +592,7 @@ function Matrix.Logistics.Tick()
                     end
                 end
 
+                if dispatch.plate then ActiveVehicleLocks[dispatch.plate] = nil end
                 ActiveDispatches[botId] = nil
             end
         end
@@ -319,12 +618,35 @@ local function Reply(src, msg)
     end
 end
 
+local DISPATCH_FAILURE_MESSAGES = {
+    bad_bot_id                 = 'Geçersiz bot ID.',
+    bot_missing                = 'Bot matriste bulunamadı.',
+    not_a_dealer                = 'Bu bot bir dealer değil.',
+    already_dispatched          = 'Bot zaten sevk halinde.',
+    no_origin                  = 'Bot için bilinen bir konum yok.',
+    missing_vector              = 'Hedef koordinatı eksik.',
+    corrupt_vector              = 'Hedef koordinatı bozuk/geçersiz.',
+    out_of_range                = 'Hedef menzil dışında.',
+    vehicle_not_found            = 'Belirtilen plaka filoda kayıtlı değil.',
+    vehicle_assigned_elsewhere  = 'Araç başka bir bota kalıcı olarak atanmış.',
+    vehicle_in_use              = 'Araç şu anda başka bir sevkiyatta kullanılıyor.'
+}
+
+local FLEET_FAILURE_MESSAGES = {
+    bad_plate                  = 'Geçersiz plaka.',
+    plate_exists                = 'Bu plaka zaten filoda kayıtlı.',
+    vehicle_not_found            = 'Plaka filoda bulunamadı.',
+    bot_missing                = 'Bot matriste bulunamadı.',
+    vehicle_assigned_elsewhere  = 'Araç başka bir bota atanmış.',
+    bot_already_has_vehicle    = 'Bu bota zaten kalıcı bir araç atanmış.'
+}
+
 RegisterCommand('sevket', function(src, args)
     local botId = tonumber(args[1])
-    local vehicleType = args[2] or Config.Logistics.DefaultVehicleType
+    local vehicleRef = args[2]
 
     if not botId then
-        Reply(src, 'Kullanim: /sevket [botId] [foot|motorbike|car]'); return
+        Reply(src, 'Kullanim: /sevket [botId] [plaka|foot]'); return
     end
 
     local ped = GetPlayerPed(src)
@@ -333,16 +655,57 @@ RegisterCommand('sevket', function(src, args)
     end
     local destination = GetEntityCoords(ped)
 
-    local ok, etaOrReason = Matrix.Logistics.DispatchDealer(botId, destination, vehicleType, src)
+    local ok, etaOrReason = Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, src)
     if ok then
-        Reply(src, ('Bot #%d sevk edildi [%s]. Tahmini varış: %.1f sn'):format(botId, vehicleType, etaOrReason))
+        Reply(src, ('Bot #%d sevk edildi. Tahmini varış: %.1f sn'):format(botId, etaOrReason))
     else
-        Reply(src, ('Sevkiyat başarısız: %s'):format(tostring(etaOrReason)))
+        Reply(src, DISPATCH_FAILURE_MESSAGES[etaOrReason] or ('Sevkiyat başarısız: %s'):format(tostring(etaOrReason)))
     end
 end, false)
 
+RegisterCommand('filokaydet', function(src, args)
+    local plate         = args[1]
+    local vehicleClass  = args[2]
+    local vinStatus     = args[3]
+    local vehicleWear   = tonumber(args[4])
+
+    local citizenid = nil
+    local state = Matrix.GetOrCreatePlayerState(src)
+    if state then citizenid = state.citizenid end
+
+    local ok, reason = Matrix.Fleet.RegisterVehicle(citizenid, plate, vehicleClass, vinStatus, vehicleWear)
+    if ok then
+        Reply(src, ('Araç filoya kaydedildi: %s'):format(plate))
+    else
+        Reply(src, FLEET_FAILURE_MESSAGES[reason] or ('Kayıt başarısız: %s'):format(tostring(reason)))
+    end
+end, false)
+
+RegisterCommand('filoata', function(src, args)
+    local plate = args[1]
+    local botId = tonumber(args[2])
+    if type(plate) ~= 'string' or not botId then
+        Reply(src, 'Kullanim: /filoata [plaka] [botId]'); return
+    end
+
+    local ok, reason = Matrix.Fleet.AssignPermanent(plate, botId)
+    if ok then
+        Reply(src, ('Araç %s -> Bot #%d kalıcı olarak atandı.'):format(plate, botId))
+    else
+        Reply(src, FLEET_FAILURE_MESSAGES[reason] or ('Atama başarısız: %s'):format(tostring(reason)))
+    end
+end, false)
+
+RegisterCommand('filobirak', function(src, args)
+    local plate = args[1]
+    if type(plate) ~= 'string' then Reply(src, 'Kullanim: /filobirak [plaka]'); return end
+
+    local ok = Matrix.Fleet.UnassignPermanent(plate)
+    Reply(src, ok and ('Araç %s serbest bırakıldı.'):format(plate) or 'Araç bulunamadı veya kalıcı atanmamış.')
+end, false)
+
 -- =====================================================================
--- EVENT BRIDGE (guard'lı — polis çakışması / çatışma bildirimi)
+-- EVENT BRIDGE (guard'lı)
 -- =====================================================================
 RegisterNetEvent('matrix:server:reportDealerEliminated', function(botId, cause)
     local src = source
@@ -368,11 +731,40 @@ RegisterNetEvent('matrix:server:reportDealerCombatDamage', function(botId, rawDa
     Matrix.Logistics.ApplyCombatDamage(botId, rawDamage)
 end)
 
+RegisterNetEvent('matrix:server:registerFleetVehicle', function(plate, vehicleClass, vinStatus, vehicleWear)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    local state = Matrix.GetOrCreatePlayerState(src)
+    Matrix.Fleet.RegisterVehicle(state and state.citizenid, plate, vehicleClass, vinStatus, vehicleWear)
+end)
+
+RegisterNetEvent('matrix:server:assignFleetVehicle', function(plate, botId)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    botId = tonumber(botId)
+    if type(plate) ~= 'string' or not botId then return end
+    Matrix.Fleet.AssignPermanent(plate, botId)
+end)
+
+RegisterNetEvent('matrix:server:unassignFleetVehicle', function(plate)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(plate) ~= 'string' then return end
+    Matrix.Fleet.UnassignPermanent(plate)
+end)
+
+RegisterNetEvent('matrix:server:reportVehicleEncircled', function(plate, cause)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(plate) ~= 'string' then return end
+    Matrix.Logistics.OnVehicleEncircled(plate, type(cause) == 'string' and cause or 'police_encirclement')
+end)
+
 -- =====================================================================
 -- EXPORTLAR
 -- =====================================================================
-exports('DispatchDealer', function(botId, dest, vType, dispatcherSrc)
-    return Matrix.Logistics.DispatchDealer(botId, dest, vType, dispatcherSrc)
+exports('DispatchDealer', function(botId, dest, vehicleRef, dispatcherSrc)
+    return Matrix.Logistics.DispatchDealer(botId, dest, vehicleRef, dispatcherSrc)
 end)
 exports('ApplyCombatDamageToDealer', function(botId, dmg)
     return Matrix.Logistics.ApplyCombatDamage(botId, dmg)
@@ -382,4 +774,20 @@ exports('EliminateDealer', function(botId, cause)
 end)
 exports('ReportDealerPoliceCollision', function(botId)
     return Matrix.Logistics.OnPoliceCollision(botId)
+end)
+
+exports('RegisterFleetVehicle', function(citizenid, plate, vehicleClass, vinStatus, vehicleWear)
+    return Matrix.Fleet.RegisterVehicle(citizenid, plate, vehicleClass, vinStatus, vehicleWear)
+end)
+exports('AssignFleetVehicle', function(plate, botId)
+    return Matrix.Fleet.AssignPermanent(plate, botId)
+end)
+exports('UnassignFleetVehicle', function(plate)
+    return Matrix.Fleet.UnassignPermanent(plate)
+end)
+exports('GetFleetVehicle', function(plate)
+    return Matrix.Fleet.GetVehicle(plate)
+end)
+exports('SeizeFleetVehicle', function(plate, cause)
+    return Matrix.Logistics.OnVehicleEncircled(plate, cause)
 end)

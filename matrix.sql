@@ -213,3 +213,61 @@ CREATE TABLE IF NOT EXISTS `matrix_kitchen_batches` (
     CONSTRAINT `fk_matrix_kitchen_batches_trap_house`
         FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Katman 4: İllegal Filo - Aktif Araç Havuzu. Bir araç ele geçirilirse
+-- (çatışma/baskın) bu tablodan hard-delete edilir; kalıcı adli mühür
+-- ayrı olarak matrix_vehicle_seizures'a yazılır.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_fleet` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `plate` VARCHAR(32) NOT NULL,
+    `vehicle_class` ENUM('motorbike', 'car') NOT NULL DEFAULT 'car',
+    `vin_status` ENUM('factory', 'scratched', 'hot') NOT NULL DEFAULT 'hot',
+    `vehicle_wear` FLOAT NOT NULL DEFAULT 0.0,
+    `registered_by_citizenid` VARCHAR(50) NULL,
+    `assigned_bot_id` INT NULL,
+    `assignment_mode` ENUM('permanent', 'temporary') NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uq_matrix_fleet_plate` (`plate`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Katman 4: Büro ALPR / Görsel Eşkal Eşleşme Günlüğü (asla silinmez).
+-- Plaka + dealer'ın fingerprint_dna_id'si + oyuncunun organizasyon
+-- imzasını (kayıt sahibi citizenid) adli veri tabanında birbirine bağlar.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_alpr_hits` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `plate` VARCHAR(32) NOT NULL,
+    `fingerprint_dna_id` VARCHAR(64) NOT NULL,
+    `organization_signature` VARCHAR(50) NOT NULL,
+    `trap_house_id` INT NOT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_alpr_hits_plate` (`plate`),
+    CONSTRAINT `fk_matrix_alpr_hits_trap_house`
+        FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Katman 4: Ele Geçirilen Araç Mührü - kalıcı kanıt katsayısı (asla silinmez).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_vehicle_seizures` (
+    `id` INT NOT NULL AUTO_INCREMENT,
+    `plate` VARCHAR(32) NOT NULL,
+    `vin_status` ENUM('factory', 'scratched', 'hot') NOT NULL,
+    `vehicle_wear` FLOAT NOT NULL DEFAULT 0.0,
+    `fingerprint_dna_id` VARCHAR(64) NOT NULL,
+    `organization_signature` VARCHAR(50) NOT NULL,
+    `seizure_cause` VARCHAR(32) NOT NULL DEFAULT 'unknown',
+    `seal_certainty` FLOAT NOT NULL,
+    `coords_x` FLOAT NOT NULL DEFAULT 0.0,
+    `coords_y` FLOAT NOT NULL DEFAULT 0.0,
+    `coords_z` FLOAT NOT NULL DEFAULT 0.0,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_vehicle_seizures_plate` (`plate`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;

@@ -140,8 +140,13 @@ Config.Logistics = {
     -- Çatışma direnci normalize edilmiş hasar biriktirir; 1.0'a ulaşınca kalıcı ölüm.
     CombatEliminationThreshold = 1.0,
 
-    -- Sevk sırasında sinyal varken (kör bölge dışında) en yakın trap house'a sızan Büro deşifre kazancı.
+    -- Sevk sırasında en yakın trap house'a sızan Büro deşifre kazancı. Büro'nun
+    -- fiziksel ALPR/eşkal takibi oyuncunun telsiz sinyaliyle ilgisizdir; sadece
+    -- bildirim (log) kör bölgede gecikir, kazancın kendisi kesilmez.
     PoliceDecryptionGainPerTick = 0.01,
+
+    -- Sevk hedefinin origin'e olan mesafesi bu limiti aşarsa "menzil dışı" reddi.
+    MaxDispatchRangeMeters = 6000.0,
 
     -- Telekomünikasyon kör noktaları: bu koordinat + yarıçap içine giren dealer'ın
     -- komuta paneliyle sinyali kopar; olaylar kör bölgeden çıkana kadar gecikmeli iletilir.
@@ -150,5 +155,34 @@ Config.Logistics = {
         { id = 2, label = 'Endustriyel Vadi', coords = vector3(900.0, -2400.0, 10.0),   radius = 250.0 },
         { id = 3, label = 'Dag Gecidi',       coords = vector3(-1900.0, 2200.0, 150.0), radius = 400.0 }
     },
-    DeadZoneLogFlushDelayMs = 4000
+    DeadZoneLogFlushDelayMs = 4000,
+
+    -- İllegal Filo Tedarik ve Atama Motoru
+    Fleet = {
+        DefaultVehicleClass = 'car',
+        DefaultVinStatus    = 'hot',
+
+        -- Aşınması yüksek araçlar sürtünmeyi wear oranında (maksimum %20) artırır.
+        WearFrictionBonus = 0.20,
+
+        -- Şasi kazınmamış (factory) araçlar yakalandığında Büro deşifre kazancını
+        -- geometrik (çarpımsal) olarak büyütür; hot en zor iz sürülen VIN durumu.
+        VinDecryptionMultiplier = {
+            factory   = 3.0,
+            scratched = 1.5,
+            hot       = 1.0
+        },
+
+        -- Ele geçirilen aracın adli mühür kesinliği VIN durumuna göre değişir.
+        SeizureSealCertainty = {
+            factory   = 0.95,
+            scratched = 0.65,
+            hot       = 0.40
+        },
+
+        -- wear bu eşiği geçerse sevkiyat yol ortasında (progress >= 0.5) bir kereye
+        -- mahsus deterministik arızayla durur (RNG yok, sabit bekleme süresi).
+        BreakdownWearThreshold = 0.75,
+        BreakdownStallSeconds  = 45
+    }
 }
