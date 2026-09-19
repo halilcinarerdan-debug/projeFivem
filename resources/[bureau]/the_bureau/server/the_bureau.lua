@@ -23,6 +23,7 @@ local RegisteredProperties = {} -- [propertyIdentifier] = { propertyType, ownerC
 local RaidCooldowns        = {} -- [propertyIdentifier] = gameTimer
 local ActiveRaids          = {} -- [propertyIdentifier] = { entities = {...}, startedAt = gameTimer }
 local ActivityCounters     = {} -- [citizenid] = number, bir sonraki SIGINT taramasinda tuketilir
+local LastKnownCoords      = {} -- [citizenid] = { x, y, z }, en son sahada gorulen meet-point konumu (StingRay sevki icin)
 
 -- ============================================================
 --  YARDIMCI FONKSIYONLAR
@@ -179,11 +180,79 @@ local function SyncStashWeights()
 end
 
 -- ============================================================
+--  AGENT SKILL MATRIX :: OPSEC RECOGNITION (sigint_cellular_matrix koprusu)
+--  Dusuk opsec_skill'in Packet_Leak_Ratio'yu logaritmik olarak tirmandirmasi
+--  ve Buro'nun sivil StingRay birimlerini o hucreye agresif sevk etmesi.
+-- ============================================================
+
+--- Deficiency (1 - opsec_skill) buyudukce [1, LeakPenaltyMulti] araliginda
+--- logaritmik olarak tirmanan sizinti carpani. opsec_skill = MaxSkill iken 1.0
+--- (ceza yok), opsec_skill = 0 iken Config.AgentSkills.Opsec.LeakPenaltyMulti (tavan).
+local function ComputeOpsecPenaltyMulti(opsecSkill)
+    local cfg = Config.AgentSkills.Opsec
+    local deficiency = 1.0 - math.max(Config.AgentSkills.MinSkill, math.min(Config.AgentSkills.MaxSkill, opsecSkill))
+
+    if deficiency <= 0.0 then
+        return 1.0
+    end
+
+    return 1.0 + (cfg.LeakPenaltyMulti - 1.0)
+        * (math.log(1.0 + deficiency * (cfg.LeakLogBase - 1.0)) / math.log(cfg.LeakLogBase))
+end
+
+--- LowSkillThreshold altindaki opsec_skill icin StingRayBaseChance'i StingRayDispatchMulti'ye
+--- dogru olcekleyip zar atar. Esik ve ustu skill'ler icin sadece taban sansi kullanilir.
+local function RollStingRayDispatch(opsecSkill)
+    local cfg = Config.AgentSkills.Opsec
+    local chance = cfg.StingRayBaseChance
+
+    if opsecSkill < cfg.LowSkillThreshold then
+        local deficiency = 1.0 - (opsecSkill / cfg.LowSkillThreshold)
+        chance = chance * (1.0 + deficiency * (cfg.StingRayDispatchMulti - 1.0))
+    end
+
+    return math.random() < chance
+end
+
+--- Sivil bir StingRay (IMSI-catcher) birimini hedef konumun etrafina pasif
+--- konumlandirir. Raid ekibinden farkli olarak celismeye girmez, sadece izler.
+local function DispatchStingRay(coords, citizenid)
+    if not coords then return false end
+
+    local cfg = Config.AgentSkills.Opsec
+    local angle = math.random() * 2 * math.pi
+
+    local sx = coords.x + math.cos(angle) * cfg.StingRayLoiterDistance
+    local sy = coords.y + math.sin(angle) * cfg.StingRayLoiterDistance
+    local sz = coords.z
+
+    local vehicle = CreateVehicle(GetHashKey(cfg.StingRayVehicle), sx, sy, sz, 0.0, true, false)
+    SetEntityAsMissionEntity(vehicle, true, true)
+
+    local operator = CreatePed(4, GetHashKey(cfg.StingRayPedModel), sx, sy, sz, 0.0, true, false)
+    SetEntityAsMissionEntity(operator, true, true)
+    SetPedIntoVehicle(operator, vehicle, -1)
+
+    TaskVehicleDriveToCoordLongrange(operator, vehicle, coords.x, coords.y, coords.z, 15.0, 1, cfg.StingRayLoiterDistance * 0.5)
+
+    AddHeat(coords.x, coords.y, Config.BureauAI.BaseWantedMulti)
+
+    TriggerEvent('bureau:server:onStingRayDispatched', coords, citizenid)
+
+    SetTimeout(cfg.StingRayLifetimeMs, function()
+        if DoesEntityExist(vehicle) then DeleteEntity(vehicle) end
+        if DoesEntityExist(operator) then DeleteEntity(operator) end
+    end)
+
+    return true
+end
+
+-- ============================================================
 --  SIGINT :: PAKET SIZINTISI / OPERASYON SIKLIGI TARAMASI
 -- ============================================================
 
 local function ScanCellularMatrix()
-    MySQL.query('SELECT id, owner_citizenid, packet_leak_ratio FROM sigint_cellular_matrix WHERE is_compromised = 0', {},
+    MySQL.query('SELECT id, owner_citizenid, packet_leak_ratio, opsec_skill FROM sigint_cellular_matrix WHERE is_compromised = 0', {},
         function(rows)
             if not rows then return end
 
@@ -192,7 +261,9 @@ local function ScanCellularMatrix()
                 local activity = row.owner_citizenid and ActivityCounters[row.owner_citizenid] or 0
 
                 if activity > 0 then
-                    local increment = Config.Sigint.PacketLeakBaseRatio * activity
+                    local opsecSkill = tonumber(row.opsec_skill) or Config.AgentSkills.DefaultSkill
+                    local penaltyMulti = ComputeOpsecPenaltyMulti(opsecSkill)
+                    local increment = Config.Sigint.PacketLeakBaseRatio * activity * penaltyMulti
                     local newRatio = math.min(1.0, tonumber(row.packet_leak_ratio) + increment)
                     local compromised = newRatio >= Config.Sigint.PacketLeakCompromiseAt
 
@@ -202,11 +273,49 @@ local function ScanCellularMatrix()
                     if compromised then
                         TriggerEvent('bureau:server:onAgentCompromised', row.id, row.owner_citizenid)
                     end
+
+                    if opsecSkill < Config.AgentSkills.Opsec.LowSkillThreshold and RollStingRayDispatch(opsecSkill) then
+                        local coords = row.owner_citizenid and LastKnownCoords[row.owner_citizenid]
+                        if coords then
+                            DispatchStingRay(coords, row.owner_citizenid)
+                        end
+                    end
                 end
             end
 
             ActivityCounters = {}
         end)
+end
+
+--- Sahada her Meet Point/lojistik veri transferinde, ilgili ajanin opsec_skill'ine
+--- gore Packet_Leak_Ratio'yu aninda (periyodik taramayi beklemeden) tirmandirir.
+local function ApplyFieldOpsecLeak(citizenid, coords)
+    if not citizenid then return end
+
+    MySQL.query([[
+        SELECT id, packet_leak_ratio, opsec_skill FROM sigint_cellular_matrix
+        WHERE owner_citizenid = ? AND entity_type = 'player_agent' LIMIT 1
+    ]], { citizenid }, function(rows)
+        if not rows or not rows[1] then return end
+
+        local row = rows[1]
+        local opsecSkill = tonumber(row.opsec_skill) or Config.AgentSkills.DefaultSkill
+        local penaltyMulti = ComputeOpsecPenaltyMulti(opsecSkill)
+        local increment = Config.Sigint.PacketLeakBaseRatio * penaltyMulti
+        local newRatio = math.min(1.0, tonumber(row.packet_leak_ratio) + increment)
+        local compromised = newRatio >= Config.Sigint.PacketLeakCompromiseAt
+
+        MySQL.update('UPDATE sigint_cellular_matrix SET packet_leak_ratio = ?, is_compromised = ? WHERE id = ?',
+            { newRatio, compromised and 1 or 0, row.id })
+
+        if compromised then
+            TriggerEvent('bureau:server:onAgentCompromised', row.id, citizenid)
+        end
+
+        if opsecSkill < Config.AgentSkills.Opsec.LowSkillThreshold and RollStingRayDispatch(opsecSkill) then
+            DispatchStingRay(coords, citizenid)
+        end
+    end)
 end
 
 -- ============================================================
@@ -308,6 +417,8 @@ function Bureau.RegisterMeetPoint(source, propertyIdentifier, clientCoords)
     if player then
         local citizenid = player.PlayerData.citizenid
         ActivityCounters[citizenid] = (ActivityCounters[citizenid] or 0) + 1
+        LastKnownCoords[citizenid] = { x = clientCoords.x, y = clientCoords.y, z = clientCoords.z }
+        ApplyFieldOpsecLeak(citizenid, clientCoords)
     end
 
     if #log >= Config.BureauAI.PatternDeceptionsBeforeRaid then

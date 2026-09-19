@@ -79,6 +79,48 @@ Config.Sigint = {
 }
 
 -- ============================================================
+--  AGENT SKILLS :: Bot Yetenek Matrisi (sigint_cellular_matrix koprusu)
+--  synthesis_skill / trade_skill / opsec_skill icin min-maks carpan limitleri.
+--  Yalnizca Opsec alt tablosu bugun the_bureau.lua tarafindan aktif tuketilir;
+--  Synthesis ve Trade katsayilari ileriki katmanlarin (cooking/pazarlik)
+--  ayni kaynaktan okumasi icin simdiden CBA usulu tanimlanir.
+-- ============================================================
+Config.AgentSkills = {
+    MinSkill     = 0.00,
+    MaxSkill     = 1.00,
+    DefaultSkill = 0.10,
+
+    -- OPSEC :: siber gizlilik / telsiz-burner telefon disiplini
+    Opsec = {
+        LowSkillThreshold      = 0.35,   -- bu esigin ALTINDAKI opsec_skill "dusuk disiplin" sayilir
+        LeakPenaltyMulti       = 2.5,    -- opsec_skill = 0 iken Packet_Leak_Ratio artisina uygulanan azami carpan
+        LeakLogBase            = 2.0,    -- logaritmik tirmanis tabani (deficiency 0->1 araliginda log egrisi)
+        StingRayBaseChance     = 0.10,   -- esik ustu (disiplinli) bir hucre icin taban StingRay sevk olasiligi
+        StingRayDispatchMulti  = 3.0,    -- LowSkillThreshold altinda, skill 0'a yaklastikca uygulanan azami sevk carpani
+        StingRayVehicle        = 'speedo',
+        StingRayPedModel       = 's_m_m_msec_01',
+        StingRayLoiterDistance = 60.0,   -- metre, StingRay biriminin pasif konumlanma mesafesi
+        StingRayLifetimeMs     = 240000, -- 4 dk, StingRay biriminin sahnede kalma suresi
+    },
+
+    -- SYNTHESIS :: kimyasal seyreltme/kesme (ileriki "cooking" katmani tuketecek)
+    Synthesis = {
+        LowSkillThreshold      = 0.35,
+        OverdoseBaseChance     = 0.02,   -- taban hatali doz/overdose olasiligi (skill = MaxSkill iken)
+        OverdoseLowSkillMulti  = 8.0,    -- synthesis_skill = 0 iken overdose olasiligina uygulanan azami carpan
+        FireBaseChance         = 0.01,   -- taban laboratuvar/yangin olasiligi
+        FireLowSkillMulti      = 6.0,    -- synthesis_skill = 0 iken yangin olasiligina uygulanan azami carpan
+    },
+
+    -- TRADE :: ticari ikna / pazar yonetim gucu (ileriki satis/pazarlik katmani tuketecek)
+    Trade = {
+        LowSkillThreshold      = 0.35,
+        PriceNegotiationMulti  = 1.5,    -- trade_skill = MaxSkill iken azami satis fiyati carpani
+        HeatSuppressionMulti   = 0.6,    -- trade_skill = MaxSkill iken satisin ekledigi heat'i bastirma carpani
+    },
+}
+
+-- ============================================================
 --  WEAPON ACOUSTICS :: Silah Sesi -> dB Referans Tablosu
 --  (client_bureau.lua acilista bunu hash tablosuna donusturur)
 -- ============================================================

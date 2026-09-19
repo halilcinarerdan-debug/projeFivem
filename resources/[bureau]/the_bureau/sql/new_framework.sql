@@ -123,3 +123,17 @@ CREATE TABLE IF NOT EXISTS `trap_house_stashes` (
         FOREIGN KEY (`owner_citizenid`) REFERENCES `players` (`citizenid`)
         ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+--  GUNCELLEME :: BOT YETENEK MATRISI (AGENT SKILL MATRIX) SUTUNLARI
+--  sigint_cellular_matrix tablosuna idempotent olarak enjekte edilir.
+--  Deger araligi (0.00 - 1.00) uygulama katmaninda Config.AgentSkills.MinSkill /
+--  Config.AgentSkills.MaxSkill uzerinden garanti edilir.
+-- ============================================================================
+ALTER TABLE `sigint_cellular_matrix`
+    ADD COLUMN IF NOT EXISTS `synthesis_skill` DECIMAL(3,2) NOT NULL DEFAULT 0.10
+        COMMENT 'Kimyasal seyreltme/kesme yetenegi, 0.00 - 1.00' AFTER `entity_type`,
+    ADD COLUMN IF NOT EXISTS `trade_skill` DECIMAL(3,2) NOT NULL DEFAULT 0.10
+        COMMENT 'Ticari ikna ve pazar yonetim gucu, 0.00 - 1.00' AFTER `synthesis_skill`,
+    ADD COLUMN IF NOT EXISTS `opsec_skill` DECIMAL(3,2) NOT NULL DEFAULT 0.10
+        COMMENT 'Siber gizlilik ve telsiz/burner telefon disiplini, 0.00 - 1.00' AFTER `trade_skill`;
