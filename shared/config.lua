@@ -535,18 +535,17 @@ Config.TrapHouseInterior = {
     -- treyleri FiveM'in bilinen "kırık/delikli interior" listesinde olduğu
     -- için düz bir RequestIpl ile de doğru render OLMAZ — bu yüzden
     -- 'bob74_ipl' kaynağı (https://github.com/Bob74/bob74_ipl) bağımlılık
-    -- olarak eklendi. ★ ÖNEMLİ (bob74_ipl kaynak kodu incelenerek doğrulandı):
-    -- bob74_ipl'in KENDİ client.lua'sı KENDİ resource start'ında OTOMATİK
-    -- olarak `TrevorsTrailer.LoadDefault()` çağırır — bu, interior'ı "trash"
-    -- durumuna getirip natif `RefreshInterior()` ile render'a da uygular.
-    -- `RefreshInterior` bob74_ipl içinde salt bir GLOBAL'dir, exports ile DIŞA
-    -- AÇILMAZ — yani bizim resource'umuz Interior.Set() çağırsa bile ardından
-    -- kendi tarafımızdan bir refresh TETİKLEYEMEYİZ; böyle bir çağrı olsa
-    -- olsa bob74_ipl'in kendi başlangıçta zaten doğru uyguladığı refresh'i
-    -- BOZAR (Clear() interior'ı gizler, sonrasında refresh'siz Enable()
-    -- render'a hiç yansımayabilir). Bu yüzden client/trap_house_client.lua
-    -- ARTIK Interior.Set() ÇAĞIRMAZ — bob74_ipl'in kendi otomatik "trash"
-    -- varsayılanına (zaten istenen "hafif kirli/dağınık" görünüm) güvenilir.
+    -- olarak eklendi ve client/trap_house_client.lua kendi
+    -- GetTrevorsTrailerObject().Interior.Set(...) çağrısını yapar (bob74_ipl
+    -- kaynak kodu — lib/common.lua — okunarak doğrulandı: bu çağrı yalnızca
+    -- düz natif RequestIpl'e sarılıdır ve IsIplActive ile korunur, yani
+    -- idempotenttir; ayrıca bob74_ipl'in kendi resource start'ında zaten
+    -- otomatik yaptığı TrevorsTrailer.LoadDefault() ile AYNI işi tekrarlar —
+    -- resource restart sırası gibi bir sebeple o ilk çağrı atlanmış olsa
+    -- bile burada güvenli bir yedek olarak yeniden talep edilmiş olur).
+    -- İnteriorun yine de render OLMAMASI durumunda client/
+    -- trap_house_client.lua'daki "/traphouseipldebug" teşhis komutu
+    -- IsIplActive/GetInteriorAtCoords sonuçlarını F8 konsoluna basar.
     -- Koordinat (bob74_ipl'in kendi client.lua'sındaki yorumdan doğrulandı):
     -- X:1985.48132 Y:3828.76757 Z:32.5. Heading/iç mekan yerleşimi (Workbench/
     -- Packaging/Exit) TAHMİNİDİR — küçük bir treyler içi olduğundan kapıya

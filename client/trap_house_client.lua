@@ -141,23 +141,28 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
     insideTrapHouse = data.trap_house_id
     shellData        = data
 
-    -- ★ DÜZELTME: bob74_ipl'in gerçek kaynak kodu incelendi — Trevor'ın
-    -- treyleri bob74_ipl'in KENDİ client.lua'sında KENDİ resource start'ında
-    -- OTOMATİK olarak `TrevorsTrailer.LoadDefault()` ile "trash" durumuna
-    -- getirilip natif `RefreshInterior()` ile render'a uygulanıyor.
-    -- `RefreshInterior` bob74_ipl içinde salt bir GLOBAL'dir, exports ile DIŞA
-    -- AÇILMAZ — yani buradan Interior.Set() çağırsak bile ardından bir
-    -- refresh TETİKLEYEMEYİZ. Böyle bir çağrı (eskiden burada vardı) olsa
-    -- olsa bob74_ipl'in başlangıçta zaten doğru uyguladığı refresh'i BOZAR:
-    -- Interior.Set() önce Clear() ile interior'ı gizler, ardından refresh'siz
-    -- Enable() render'a hiç yansımayabilir — tam olarak bildirilen "blip
-    -- üzerine ışınlandım ama içerisi yok" belirtisiyle örtüşüyor. Bu yüzden
-    -- burada ARTIK Interior.Set() ÇAĞRILMAZ; bob74_ipl'in kendi otomatik
-    -- "trash" varsayılanına güvenilir (zaten istenen "hafif kirli/dağınık"
-    -- görünüm budur). Sunucuda bob74_ipl KURULU + BAŞLATILMIŞ (server.cfg ->
-    -- "start bob74_ipl") DEĞİLSE bu resource zaten hiç başlamaz (fxmanifest
-    -- dependencies), dolayısıyla burada ayrıca bir varlık kontrolüne gerek
-    -- yoktur.
+    -- ★ DÜZELTME (bob74_ipl'in GERÇEK kaynak kodu -- lib/common.lua --
+    -- okunarak doğrulandı): `Interior.Set(interior)` yalnızca `Interior.
+    -- Clear()` + `EnableIpl(interior, true)` yapar; `EnableIpl` da (aktif
+    -- ederken) düz natif `RequestIpl(ipl)` çağırır -- `RefreshInterior` BURADA
+    -- HİÇ DEVREYE GİRMEZ (yalnızca "Details" -- kask/evrak çantası gibi
+    -- interior İÇİ prop'lar -- için kullanılır, ana treyler IPL takası için
+    -- gerekmez). Yani bir önceki düzeltmede bu çağrının "render'ı bozduğu"
+    -- varsayımı YANLIŞTI; kaldırılmıştı, şimdi GÜVENLE geri eklendi.
+    -- `RequestIpl` zaten `IsIplActive` ile korunuyor (EnableIpl içinde), yani
+    -- bu çağrı bob74_ipl'in kendi `TrevorsTrailer.LoadDefault()` ile
+    -- başlangıçta yaptığı işin AYNISINI tekrar yapar -- ZARARSIZ ve
+    -- IDEMPOTENT. Amaç: bob74_ipl'in kendi tek seferlik başlangıç thread'i
+    -- herhangi bir sebeple (resource restart sırası, bu oyuncunun bob74_ipl
+    -- henüz tam başlamadan bağlanmış olması vb.) atlanmış olsa bile burada
+    -- YENİDEN talep edilmiş olur.
+    local iplOk, trailerObj = pcall(function() return exports['bob74_ipl']:GetTrevorsTrailerObject() end)
+    if iplOk and type(trailerObj) == 'table' and trailerObj.Interior and trailerObj.Interior.Set then
+        pcall(trailerObj.Interior.Set, trailerObj.Interior.trash)
+    else
+        print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya export basarisiz -- Trevor\'in treyleri dogru render OLMAYABILIR. Teshis icin "/traphouseipldebug" komutunu calistirin.')
+    end
+
     local enter = data.enter_coords
     if enter then
         SetEntityCoords(PlayerPedId(), enter.x, enter.y, enter.z, false, false, false, false)
@@ -423,3 +428,35 @@ RegisterNetEvent('matrix:client:doorReinforcement:lastStand', function()
         })
     end
 end)
+
+-- =====================================================================
+-- ★ TEŞHİS KOMUTU (GEÇİCİ): bob74_ipl'in Trevor'ın treyleri için IPL'i
+-- GERÇEKTEN aktif edip etmediğini ve o koordinatta oyun motorunun bir
+-- interior görüp görmediğini doğrudan F8 konsoluna basar. İki başarısız
+-- kod-tahmininden sonra üçüncü kez körlemesine tahmin YAPILMIYOR — bunun
+-- yerine gerçek durum ölçülüyor. Konsol çıktısı köke inince bu komut
+-- kaldırılabilir.
+-- =====================================================================
+RegisterCommand('traphouseipldebug', function()
+    local ok, trailerObj = pcall(function() return exports['bob74_ipl']:GetTrevorsTrailerObject() end)
+    print(('[TRAPHOUSE_IPL_DEBUG] export cagrisi basarili=%s trailerObj tip=%s'):format(tostring(ok), type(trailerObj)))
+
+    if ok and type(trailerObj) == 'table' then
+        local interiorId = trailerObj.interiorId
+        local tidyName   = trailerObj.Interior and trailerObj.Interior.tidy
+        local trashName  = trailerObj.Interior and trailerObj.Interior.trash
+        print(('[TRAPHOUSE_IPL_DEBUG] interiorId=%s tidy=%s trash=%s'):format(tostring(interiorId), tostring(tidyName), tostring(trashName)))
+        print(('[TRAPHOUSE_IPL_DEBUG] IsIplActive(trash)=%s IsIplActive(tidy)=%s'):format(tostring(IsIplActive(trashName)), tostring(IsIplActive(tidyName))))
+    else
+        print('[TRAPHOUSE_IPL_DEBUG] UYARI: bob74_ipl export cagrisi basarisiz oldu -- kaynak calismiyor veya export kaydolmamis.')
+    end
+
+    local sx, sy, sz = 1985.48132, 3828.76757, 32.5
+    local interiorAt = GetInteriorAtCoords(sx, sy, sz)
+    print(('[TRAPHOUSE_IPL_DEBUG] GetInteriorAtCoords(%.4f, %.4f, %.4f) = %s'):format(sx, sy, sz, tostring(interiorAt)))
+
+    local ped = PlayerPedId()
+    local myCoords = GetEntityCoords(ped)
+    local myInteriorEntity = GetInteriorFromEntity(ped)
+    print(('[TRAPHOUSE_IPL_DEBUG] oyuncu konumu=%.4f,%.4f,%.4f  GetInteriorFromEntity(ped)=%s'):format(myCoords.x, myCoords.y, myCoords.z, tostring(myInteriorEntity)))
+end, false)
