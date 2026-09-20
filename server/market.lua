@@ -36,6 +36,11 @@
 --        bölge başına yuvarlanan (rolling) bir kâr/zarar defterine
 --        (matrix_zone_ledger) işlenir. F10 "Bölgesel Mali Rapor"
 --        sekmesi bu defteri okur.
+--   [U8] ACİL TAHLİYE bülteni: BuildSnapshot artık Matrix.Dispatches'i
+--        tarayıp bu oyuncunun (panic_dispatcher_src == src) tetiklediği
+--        aktif panik tahliyeleri için kırmızı bir [DURUM: ACİL TAHLİYE —
+--        SANA DOĞRU GELİYOR] satırı ekler (bkz. server/main.lua Matrix.
+--        TriggerPanicEvacuation). Yalnızca ilgili oyuncuya görünür.
 -- =====================================================================
 
 Matrix.Hierarchy    = Matrix.Hierarchy    or {}
@@ -728,6 +733,29 @@ function Matrix.Hud.BuildSnapshot(src)
         { text = '[SAHA OPERASYONU]', header = true },
         { text = ('AKTIF-BOT:%d  SEVKIYAT:%d'):format(botCount, dispatchCount) }
     }
+
+    -- ★ KATMAN 5 ULTIMATE [U8]: ACİL TAHLİYE bülteni — YALNIZCA bu oyuncunun
+    -- kendi tetiklediği bir panik tahliyesi (bkz. server/main.lua Matrix.
+    -- TriggerPanicEvacuation / /panikiptal) aktifken görünür; başka
+    -- oyuncuların HUD'unda hiç basılmaz (dispatch.panic_dispatcher_src ==
+    -- src kontrolü). Aynı anda birden fazla bot panikte olabileceğinden her
+    -- biri kendi satırını alır. Sabit metin: çiğ mesafe/süre YOK (Sıfır Sayı
+    -- Standardı), her zaman kırmızı (danger=true) basılır.
+    local panicLines = {}
+    for panicBotId, dispatch in pairs(Matrix.Dispatches or {}) do
+        if dispatch.panic_evacuation and dispatch.panic_dispatcher_src == src then
+            panicLines[#panicLines + 1] = {
+                text   = ('[DURUM: ACIL TAHLIYE — SANA DOGRU GELIYOR] (Bot #%d)'):format(panicBotId),
+                danger = true
+            }
+        end
+    end
+    if #panicLines > 0 then
+        snapshot[#snapshot + 1] = { text = '[ACIL DURUM]', header = true }
+        for i = 1, #panicLines do
+            snapshot[#snapshot + 1] = panicLines[i]
+        end
+    end
 
     -- ★ [U5] COMINT bloğu — her zaman en az bir satır ("kayıt yok" dahil),
     -- çiğ sayı YASAK standardı (bkz. shared/config.lua Katman 5 EVRİM notu)

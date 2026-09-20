@@ -84,6 +84,21 @@
 --        dispatch'leri (TaskVehicleDriveToCoord) DEĞİŞMEDİ. Yeni bir
 --        thread/Wait YOK — ilerleme yine mevcut TickPhysicalDispatches
 --        tick döngüsü tarafından izlenir, 0 Resmon bütçesi korunur.
+--        DOĞRULAMA: SpawnDispatchActors/AdvanceRouteWaypoint/reissue'nun
+--        ÜÇÜNDE de araç dalı (dispatch.vehicle_net_id dolu / vehicle_type
+--        'car'|'motorbike') TaskVehicleDriveToCoord kullanmaya devam
+--        ediyor — yaya ve araç görevleri HİÇBİR noktada karışmıyor.
+--   [U8] ACİL TAHLİYE (PANİK) MOTORU: Matrix.TriggerPanicEvacuation +
+--        /panikiptal [botId] (F10 Canlı Kadro -> "Acil Tahliye (Görevi
+--        İptal Et)"). Aktif bir dispatch'in Co-Op Mutex'i kırılır, eski
+--        rota zinciri terk edilir, AYNI ped/araç (ışınlanma YOK) "son hız"
+--        (PANIC_EVAC_*_SPEED_MS) ile tetikleyen oyuncunun canlı konumuna
+--        yönlendirilir; PANIC_REISSUE_TICKS periyodunda hedef oyuncunun
+--        O ANKİ konumuna yeniden senkronize edilir (bot "kovalamaya"
+--        devam eder). Yeni bir thread YOK — mevcut TickPhysicalDispatches
+--        döngüsü aynen kullanılır. HUD'da (K/F6) [DURUM: ACİL TAHLİYE —
+--        SANA DOĞRU GELİYOR] bülteni server/market.lua BuildSnapshot'a
+--        eklendi.
 -- =====================================================================
 
 -- ---------- Upvalue localization (perf) ----------
@@ -656,6 +671,19 @@ local DISPATCH_BASE_FOOT_SPEED_MS     = 1.4
 local DISPATCH_BASE_VEHICLE_SPEED_MS  = 15.0
 local DISPATCH_MIN_SPEED_FRACTION     = 0.25
 
+-- ★ KATMAN 5 ULTIMATE [U8]: ACİL TAHLİYE (PANİK) MOTORU sabitleri.
+-- "Son hız" (top speed) normal sevkiyat hızlarının ÜZERİNDE, sabit ve
+-- deterministik iki değerdir (RNG yok). PANIC_REISSUE_TICKS, normal
+-- DISPATCH_TASK_REISSUE_TICKS'ten (25 tick) BİLİNÇLİ olarak daha kısadır:
+-- panik modundaki bot, tetikleyen oyuncunun O ANKİ canlı konumunu HER
+-- yenileme turunda yeniden okur (bkz. TickPhysicalDispatches) — oyuncu
+-- hareket etse bile "sana doğru geliyor" davranışı sürer. Bu, YENİ bir
+-- thread/Wait AÇMAZ — aynı mevcut tick döngüsünün içinde, yalnızca farklı
+-- bir eşik değeriyle çalışır; 0 Resmon bütçesi korunur.
+local PANIC_EVAC_VEHICLE_SPEED_MS     = 25.0
+local PANIC_EVAC_FOOT_SPEED_MS        = 4.0
+local PANIC_REISSUE_TICKS             = 5
+
 local PoliceSources       = {}
 local policeFailCount     = 0
 local policeDisabledUntil = 0
@@ -1164,6 +1192,105 @@ function Matrix.CompleteDispatch(botId, reason)
     return true
 end
 
+-- =====================================================================
+-- ★ KATMAN 5 ULTIMATE [U8]: ACİL TAHLİYE (PANİK) MOTORU
+--
+-- Aktif bir dispatch'in (rotalı veya tekli fark etmez) Co-Op Mutex'ini
+-- KIRAR, o dispatch'in ESKİ rota zincirini terk eder ve AYNI ped/araç
+-- entity'sini (yeniden doğurmadan — ışınlanma YOK, SpawnDispatchActors/
+-- DespawnBot hiç çağrılmaz) tetikleyen oyuncunun (dispatcherSrc) o anki
+-- canlı konumuna doğru "son hız" yeni bir göreve yönlendirir.
+--
+-- Mutex "kırılması" GEÇİCİDİR: is_locked önce false'a çekilir (istenen
+-- davranış budur), hemen ardından AYNI dispatch kaydı panik moduna
+-- güncellenip yeniden true'ya çekilir — böylece bota ikinci bir çakışan
+-- sevk emri (o panik koşusu sürerken) verilemez, ama eski rota zinciri
+-- tamamen terk edilmiş olur. TickPhysicalDispatches bu güncellenmiş
+-- dispatch'i AYNI tick döngüsünde (yeni thread/Wait YOK) izlemeye devam
+-- eder; PANIC_REISSUE_TICKS periyodunda hedef oyuncunun canlı konumuna
+-- yeniden senkronize edilir (bkz. yukarıdaki reissue bloğu). Bot hedefe
+-- ulaştığında mevcut CompleteDispatch('arrived') akışı AYNEN çalışır —
+-- ped/araç dünyadan silinir, bot RAM'de STABİL/BEKLEMEDE'ye döner
+-- (aynı "sahadan çekildi" semantiği, ekstra bir kod yolu icat edilmedi).
+-- =====================================================================
+function Matrix.TriggerPanicEvacuation(botId, dispatcherSrc)
+    botId = tonumber(botId)
+    if not botId then return false, 'bad_bot_id' end
+
+    local bot = Matrix.Bots[botId]
+    if not bot then return false, 'bot_missing' end
+
+    local dispatch = Matrix.Dispatches[botId]
+    if not dispatch then return false, 'not_dispatched' end
+
+    if type(dispatcherSrc) ~= 'number' or dispatcherSrc <= 0 then return false, 'bad_dispatcher' end
+    local dispatcherPed = GetPlayerPed(dispatcherSrc)
+    if not dispatcherPed or dispatcherPed == 0 then return false, 'dispatcher_ped_missing' end
+
+    local ped = NetworkGetEntityFromNetworkId(dispatch.entity_net_id)
+    if not ped or ped == 0 or not DoesEntityExist(ped) then return false, 'entity_missing' end
+
+    local veh = nil
+    if dispatch.vehicle_net_id then
+        veh = NetworkGetEntityFromNetworkId(dispatch.vehicle_net_id)
+        if not veh or veh == 0 or not DoesEntityExist(veh) then
+            return false, 'vehicle_missing'
+        end
+    end
+
+    local dRaw = GetEntityCoords(dispatcherPed)
+    local targetCoords = vector3(dRaw.x, dRaw.y, dRaw.z)
+    if not _SafeVec(targetCoords) then return false, 'bad_dispatcher_coords' end
+
+    -- ★ Tüm ön-koşullar doğrulandı — ŞİMDİ görev atamasını dene. Mutex
+    -- kırma dahil TÜM state mutasyonları YALNIZCA görev başarıyla
+    -- atanırsa uygulanır; böylece başarısız bir native çağrısı dispatch'i
+    -- tutarsız bir ara durumda (mutex kırılmış ama hiçbir yeni görev
+    -- verilmemiş) BIRAKMAZ.
+    local speed = veh and PANIC_EVAC_VEHICLE_SPEED_MS or PANIC_EVAC_FOOT_SPEED_MS
+    local taskOk
+    if veh then
+        taskOk = pcall(TaskVehicleDriveToCoord,
+            ped, veh,
+            targetCoords.x, targetCoords.y, targetCoords.z,
+            speed, 0, 0, 16777216, 5.0, 1
+        )
+    else
+        taskOk = pcall(TaskFollowNavMeshToCoord,
+            ped,
+            targetCoords.x, targetCoords.y, targetCoords.z,
+            speed, NAVMESH_TASK_TIMEOUT, NAVMESH_STOPPING_RANGE_M,
+            NAVMESH_PERSIST_FOLLOWING, 0.0
+        )
+    end
+    if not taskOk then return false, 'task_assignment_failed' end
+
+    -- ★ Görev başarıyla atandı — mutex KIRILIR (istenen davranış), eski
+    -- rota zinciri terk edilir, dispatch panik moduna alınır, ardından
+    -- mutex YENİDEN kurulur (panik koşusu da bir dispatch'tir, bitene
+    -- kadar bota ikinci bir çakışan emir verilemez).
+    bot.state.is_locked = false
+
+    dispatch.route_queue          = nil
+    dispatch.route_index          = nil
+    dispatch.destination          = targetCoords
+    dispatch.panic_evacuation     = true
+    dispatch.panic_dispatcher_src = dispatcherSrc
+    dispatch.task_retry_ticks     = 0
+    dispatch.police_dwell         = 0
+    dispatch.comms_lost           = false
+    dispatch.cruise_speed         = speed
+
+    bot.state.is_locked = true
+    bot.state.activity   = 'panic_evacuation'
+
+    Matrix.Log('CORE',
+        '[ACIL TAHLIYE] Bot #%d gorevi terk etti; dispatcher src=%d konumuna (%.1f,%.1f,%.1f) dogru son hizla yola cikti.',
+        botId, dispatcherSrc, targetCoords.x, targetCoords.y, targetCoords.z)
+
+    return true
+end
+
 --- Dispatch entity'sini dünyadan siler. Opsiyonel `dispatch` argümanı
 --- verilmezse Dispatches[botId] aranır (geriye dönük uyumlu). Co-Op Mutex
 --- burada da güvenlik ağı olarak serbest bırakılır.
@@ -1356,8 +1483,31 @@ function Matrix.TickPhysicalDispatches()
                             end
                         end
 
-                        if dispatch.task_retry_ticks >= DISPATCH_TASK_REISSUE_TICKS then
+                        -- ★ [U8] Panik tahliye modunda daha kısa (PANIC_REISSUE_TICKS)
+                        -- bir yenileme eşiği kullanılır — bot, tetikleyen oyuncuyu
+                        -- normal sevkiyattan daha sık "kovalar".
+                        local reissueThreshold = dispatch.panic_evacuation
+                            and PANIC_REISSUE_TICKS or DISPATCH_TASK_REISSUE_TICKS
+
+                        if dispatch.task_retry_ticks >= reissueThreshold then
                             dispatch.task_retry_ticks = 0
+
+                            -- ★ [U8] Panik modunda hedef, HER yenileme turunda
+                            -- tetikleyen oyuncunun O ANKİ canlı konumuna güncellenir
+                            -- (oyuncu hareket etse bile bot peşinden gelir). Oyuncu
+                            -- artık çözülemiyorsa (çevrimdışı/ped yok) son bilinen
+                            -- hedef korunur — görev sessizce iptal OLMAZ.
+                            if dispatch.panic_evacuation and dispatch.panic_dispatcher_src then
+                                local dispatcherPed = GetPlayerPed(dispatch.panic_dispatcher_src)
+                                if dispatcherPed and dispatcherPed ~= 0 then
+                                    local dRaw = GetEntityCoords(dispatcherPed)
+                                    local liveTarget = vector3(dRaw.x, dRaw.y, dRaw.z)
+                                    if _SafeVec(liveTarget) then
+                                        dispatch.destination = liveTarget
+                                    end
+                                end
+                            end
+
                             local reissueSpeed = dispatch.cruise_speed or DISPATCH_BASE_VEHICLE_SPEED_MS
                             if dispatch.vehicle_net_id then
                                 local veh = NetworkGetEntityFromNetworkId(dispatch.vehicle_net_id)
@@ -1782,6 +1932,43 @@ RegisterCommand('operatiftasfiye', function(src, args)
 end, false)
 
 -- =====================================================================
+-- ★ KATMAN 5 ULTIMATE [U8]: /panikiptal — ACİL TAHLİYE (GÖREVİ İPTAL ET)
+-- F10 "Canlı Kadro" menüsünde bir bota tıklanınca açılan "Acil Tahliye
+-- (Görevi İptal Et)" aksiyonunun arkasındaki komut; bkz. Matrix.
+-- TriggerPanicEvacuation (yukarıda) için tam davranış açıklaması.
+-- =====================================================================
+local PANIC_EVAC_FAILURE_MESSAGES = {
+    bad_bot_id              = 'Gecersiz bot ID.',
+    bot_missing              = 'Bot matriste bulunamadi.',
+    not_dispatched           = 'Bot su anda aktif bir sevkiyatta degil (sahada degil), acil tahliye tetiklenemez.',
+    bad_dispatcher           = 'Komutu tetikleyen oyuncu cozulemedi.',
+    dispatcher_ped_missing   = 'Ped\'iniz bulunamadi.',
+    entity_missing           = 'Botun fiziksel varligi (ped) dunyada bulunamadi.',
+    vehicle_missing          = 'Botun aracı dunyada bulunamadi.',
+    bad_dispatcher_coords    = 'Konumunuz cozulemedi.',
+    task_assignment_failed   = 'Gorev atamasi basarisiz oldu.'
+}
+
+RegisterCommand('panikiptal', function(src, args)
+    local botId = tonumber(args[1])
+    if not botId then Reply(src, 'Kullanim: /panikiptal [botId]'); return end
+
+    if Matrix.Hierarchy and Matrix.Hierarchy.HasCommandAuthority then
+        local callerState = Matrix.GetOrCreatePlayerState(src)
+        if not callerState or not callerState.citizenid or not Matrix.Hierarchy.HasCommandAuthority(callerState.citizenid) then
+            Reply(src, 'Bu emri vermek icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
+        end
+    end
+
+    local ok, reason = Matrix.TriggerPanicEvacuation(botId, src)
+    if ok then
+        Reply(src, ('[ACIL TAHLIYE TETIKLENDI] Bot #%d gorevini terk etti, son hizla sana dogru geliyor.'):format(botId))
+    else
+        Reply(src, PANIC_EVAC_FAILURE_MESSAGES[reason] or ('Acil tahliye tetiklenemedi: %s'):format(tostring(reason)))
+    end
+end, false)
+
+-- =====================================================================
 -- ★ KATMAN 5 [H11]: /rotaciz — MULTI-WAYPOINT TAKTİK ROTA MOTORU
 --
 -- Her waypoint argümanı ya salt tam sayı bir Trap House ID'si ya da
@@ -1967,6 +2154,9 @@ exports('GetActiveDispatches', function()
 end)
 exports('DepositDealerCargoToTrapStash', function(botId, trapHouseId)
     return Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
+end)
+exports('TriggerPanicEvacuation', function(botId, dispatcherSrc)
+    return Matrix.TriggerPanicEvacuation(botId, dispatcherSrc)
 end)
 
 exports('ReportWeaponDischarge', function(actorRef, weaponSerial, invId, slot)

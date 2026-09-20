@@ -56,6 +56,11 @@
 --   [U5] COMINT: F6/K Taktik HUD paneline [COMINT ISTIHBARAT PROFILI]
 --        bloğu eklendi (server/market.lua BuildSnapshot tarafından
 --        beslenir). K tuşu aynı HUD'u açıp/kapatan ek bir tuş bağıdır.
+--   [U8] ACİL TAHLİYE: OpenBotActionsMenu'ye "Acil Tahliye (Görevi İptal
+--        Et)" aksiyonu eklendi ("/panikiptal [botId]", server/main.lua
+--        Matrix.TriggerPanicEvacuation). Tetiklendiğinde HUD'da (K/F6)
+--        server/market.lua'nın eklediği kırmızı [DURUM: ACİL TAHLİYE —
+--        SANA DOĞRU GELİYOR] satırı görünür.
 -- =====================================================================
 
 local hudActive = false
@@ -583,6 +588,18 @@ local function OpenBotActionsMenu(botId, roleLabel)
             icon        = 'user-slash',
             iconColor   = '#ff4444',
             onSelect    = function() ExecuteCommand(('operatiftasfiye %d'):format(botId)) end
+        },
+        {
+            -- ★ KATMAN 5 ULTIMATE [U8]: sunucu, botun su an aktif bir
+            -- sevkiyatta olup olmadigini kendi dogrular (Matrix.Dispatches[botId])
+            -- - client tarafinda ekstra bir durum kontrolu YAPILMAZ, bu yuzden
+            -- aksiyon her bot icin gosterilir; uygun degilse sunucu acik bir
+            -- hata mesajiyla geri doner (bkz. server/main.lua /panikiptal).
+            title       = 'Acil Tahliye (Gorevi Iptal Et)',
+            description = 'Botun mevcut rotasini/mutex kilidini kirar, isinlanma OLMADAN son hizla senin konumuna yollar.',
+            icon        = 'truck-medical',
+            iconColor   = '#ff4444',
+            onSelect    = function() ExecuteCommand(('panikiptal %d'):format(botId)) end
         }
     }
 
