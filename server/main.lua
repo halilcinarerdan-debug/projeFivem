@@ -907,12 +907,14 @@ function Matrix.BeginRouteDispatch(botId, origin, waypointRefs, finalRef, plate,
     routeQueue[#routeQueue + 1] = finalRef
 
     -- ★ Işınlanma koruması: HER bacak ayrı ayrı doğrulanır, hiçbir entity
-    -- dünyaya doğmadan ÖNCE.
+    -- dünyaya doğmadan ÖNCE. Hangi bacağın çok kısa olduğunu çağırana
+    -- bildirmek için leg index'i (i) ve ölçülen mesafeyi de döndürür.
     local legOrigin = origin
     for i = 1, #routeQueue do
         local legDest = routeQueue[i]
-        if #(legOrigin - legDest) < Config.Logistics.MinDispatchDistanceMeters then
-            return false, 'too_close'
+        local legDist = #(legOrigin - legDest)
+        if legDist < Config.Logistics.MinDispatchDistanceMeters then
+            return false, 'too_close', i, legDist
         end
         legOrigin = legDest
     end
@@ -1596,9 +1598,15 @@ RegisterCommand('rotaciz', function(src, args)
     local origin = SafeForwardCoords(src, 2.0)
     if not origin then Reply(src, 'Rota baslatmak icin gecerli bir ped gerekli.'); return end
 
-    local ok, err = Matrix.BeginRouteDispatch(botId, origin, waypoints, finalCoords, plate, vehicleType, src)
+    local ok, err, legIndex, legDist = Matrix.BeginRouteDispatch(botId, origin, waypoints, finalCoords, plate, vehicleType, src)
     if ok then
         Reply(src, ('[ROTA CIZILDI] Bot #%d icin %d ugraklik taktik kacis rotasi baslatildi.'):format(botId, #waypoints + 1))
+    elseif err == 'too_close' and legIndex then
+        local totalLegs = #waypoints + 1
+        local fromLabel = (legIndex == 1) and 'Oyuncu Konumu' or ('Ugrak #%d'):format(legIndex - 1)
+        local toLabel   = (legIndex == totalLegs) and 'Final Hedef' or ('Ugrak #%d'):format(legIndex)
+        Reply(src, ('Rota baslatilamadi: %s -> %s arasi cok yakin (%.1fm < %.1fm gerekli). Isinlanma korumasi engelledi.'):format(
+            fromLabel, toLabel, legDist or 0.0, Config.Logistics.MinDispatchDistanceMeters))
     else
         Reply(src, ('Rota baslatilamadi: %s'):format(tostring(err)))
     end
