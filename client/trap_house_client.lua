@@ -163,21 +163,32 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya export basarisiz -- Trevor\'in treyleri dogru render OLMAYABILIR. Teshis icin "/traphouseipldebug" komutunu calistirin.')
     end
 
-    -- ★ TEŞHİS SONUCU (/traphouseipldebug): IsIplActive(trash)=true VE
-    -- GetInteriorAtCoords(EnterCoords) SIFIR DEĞİL (1794) -- yani bob74_ipl
-    -- IPL'i gerçekten aktif ediyor ve oyun motoru o noktada GERÇEK bir
-    -- interior tanıyor. Sorun koordinat/bob74_ipl kurulumu DEĞİL. Kalan en
-    -- olası açıklama: SetEntityCoords ANINDA bir ışınlama yapar ama interior
-    -- geometrisi/collision'ı akışa (streaming) o anda henüz binmemiş olabilir
-    -- -- özellikle oyuncu o interior'a yürüyerek YAKLAŞMADAN, doğrudan
-    -- ışınlandığında (normal oyunda yürürken motor bunu önceden aşamalı
-    -- olarak yükler, ama SetEntityCoords bu yükleme penceresini atlar). Bu,
-    -- FiveM'de özel interior ışınlamalarında STANDART bir sorun ve standart
-    -- çözümü: hedefte collision talep et + kısa bir ekran kararması ile
-    -- motora birkaç kare/saniye yükleme payı ver, sonra ışınla.
+    -- ★ TEŞHİS SONUCU 2 (/traphouseipldebug, tam ışınlama anında koşuldu):
+    -- oyuncu konumu EnterCoords ile TAM eşleşiyor (dogru yerdeyiz), IsIplActive
+    -- ve GetInteriorAtCoords hala pozitif -- ama GetInteriorFromEntity(ped)=0.
+    -- Yani oyun motoru oyuncuyu HALA o interior'ın İÇİNDE saymıyor. Demek ki
+    -- bir önceki düzeltmemdeki `HasCollisionLoadedAroundEntity` yanlış
+    -- native'di -- o GENEL dünya collision'ını kontrol ediyor, interior'a
+    -- ÖZEL "pin/hazır" durumunu değil. GTA5/FiveM'in interior'lara özel
+    -- gerçek native çifti: `PinInteriorInMemory(interiorId)` (motora o
+    -- interior'ı belleğe sabitlemesini söyler) + `IsInteriorReady(interiorId)`
+    -- (o sabitleme bitene kadar bekle). `RefreshInterior(interiorId)` de
+    -- (bob74_ipl'in kendi Lua sarmalayıcısı değil, GTA5'in DÜZ NATİF'i --
+    -- her resource'tan çağrılabilir) entity-set değişikliklerini interior'a
+    -- işler. GetInteriorAtCoords zaten interior handle'ını (1794) verdiği
+    -- için burada onu kullanıp ışınlamadan ÖNCE pin'liyoruz.
     local enter = data.enter_coords
     if enter then
         local ped = PlayerPedId()
+
+        local interiorId = GetInteriorAtCoords(enter.x, enter.y, enter.z)
+        if interiorId ~= 0 then
+            PinInteriorInMemory(interiorId)
+            local pinWaitStart = GetGameTimer()
+            while not IsInteriorReady(interiorId) and (GetGameTimer() - pinWaitStart) < 3000 do
+                Wait(50)
+            end
+        end
 
         RequestCollisionAtCoord(enter.x, enter.y, enter.z)
         DoScreenFadeOut(300)
@@ -188,6 +199,10 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
 
         SetEntityCoords(ped, enter.x, enter.y, enter.z, false, false, false, false)
         SetEntityHeading(ped, enter.w or 0.0)
+
+        if interiorId ~= 0 then
+            RefreshInterior(interiorId)
+        end
 
         local collisionWaitStart = GetGameTimer()
         while not HasCollisionLoadedAroundEntity(ped) and (GetGameTimer() - collisionWaitStart) < 2500 do
@@ -483,6 +498,9 @@ RegisterCommand('traphouseipldebug', function()
     local sx, sy, sz = 1985.48132, 3828.76757, 32.5
     local interiorAt = GetInteriorAtCoords(sx, sy, sz)
     print(('[TRAPHOUSE_IPL_DEBUG] GetInteriorAtCoords(%.4f, %.4f, %.4f) = %s'):format(sx, sy, sz, tostring(interiorAt)))
+    if interiorAt and interiorAt ~= 0 then
+        print(('[TRAPHOUSE_IPL_DEBUG] IsInteriorReady(%s) = %s'):format(tostring(interiorAt), tostring(IsInteriorReady(interiorAt))))
+    end
 
     local ped = PlayerPedId()
     local myCoords = GetEntityCoords(ped)
