@@ -36,5 +36,12 @@ dependencies {
     'ox_lib',
     'qbx_core',
     'oxmysql',
-    'ox_inventory'
+    'ox_inventory',
+    -- ★ KATMAN 6: Trap house iç mekanı (client/trap_house_client.lua)
+    -- Trevor'ın treylerini doğru render etmek için bu kaynağı kullanır
+    -- (bkz. shared/config.lua Config.TrapHouseInterior.Shell yorumu).
+    -- Kurulum: https://github.com/Bob74/bob74_ipl -> resources/ klasörüne
+    -- çıkarıp server.cfg'ye "start bob74_ipl" ekleyin (bu satırdan ÖNCE
+    -- veya bağımsız bir yerde olabilir, sıra kritik değildir).
+    'bob74_ipl'
 }

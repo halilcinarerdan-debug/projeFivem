@@ -133,8 +133,22 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         SetEntityHeading(PlayerPedId(), enter.w or 0.0)
     end
 
-    if data.required_ipl and type(data.required_ipl) == 'string' then
-        pcall(RequestIpl, data.required_ipl)
+    -- ★ 'bob74_ipl' (https://github.com/Bob74/bob74_ipl) — Trevor'ın
+    -- treyleri FiveM'in bilinen "kırık/delikli interior" listesinde
+    -- olduğundan düz bir RequestIpl ile doğru render OLMUYOR; bu kaynağın
+    -- resmi client-side GetTrevorsTrailerObject() API'si kullanılır.
+    -- Sunucuda bu kaynak KURULU + BAŞLATILMIŞ (server.cfg -> "start
+    -- bob74_ipl") DEĞİLSE export bulunamaz — bu durumda oyuncuya hiçbir
+    -- şey KIRILMAZ (pcall korumalı), yalnızca client konsoluna açık bir
+    -- uyarı basılır ki sorun "sessizce açık havada kalmak" yerine hemen
+    -- teşhis edilebilsin.
+    if data.use_bob74_trevors_trailer then
+        local ok, trailerObj = pcall(function() return exports['bob74_ipl']:GetTrevorsTrailerObject() end)
+        if ok and type(trailerObj) == 'table' and trailerObj.Interior and trailerObj.Interior.Set then
+            pcall(trailerObj.Interior.Set, trailerObj.Interior.trash)
+        else
+            print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya baslatilmamis -- Trevor\'in treyleri dogru render OLMAYACAK. Sunucuya bob74_ipl kurup server.cfg icine "start bob74_ipl" ekleyin: https://github.com/Bob74/bob74_ipl')
+        end
     end
 
     -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC'ler

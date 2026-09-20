@@ -530,22 +530,27 @@ Config.TrapHouseInterior = {
     -- bu yüzden çok daha toleranslı bir sınır kullanılır.
     EntryZTolerance   = 8.0,
 
-    -- ★★★ BİLİNEN SORUN — HENÜZ ÇÖZÜLMEDİ ★★★
-    -- Buradaki koordinat DOĞRULANMAMIŞ bir tahmindi ve oyuncuyu Sandy
-    -- Shores'ta AÇIK HAVAYA (Trevor'ın treylerinin GERÇEK konumuna değil)
-    -- ışınladığı doğrulandı. Ayrıca Trevor'ın treyleri, FiveM'in bilinen
-    -- "kırık/delikli interior" listesindeki lokasyonlardan biri — düz bir
-    -- RequestIpl çağrısıyla doğru render OLMUYOR (bkz. bob74_ipl projesinin
-    -- bu konumu özel olarak ele alması). Kalıcı çözüm kullanıcıyla
-    -- konuşulan üç seçenekten birine bağlı (bob74_ipl bağımlılığı / kendi
-    -- prop'larımızdan inşa edilen oda / gerçek bir MLO kaynağı) — o karar
-    -- verilene kadar bu Shell BİLEREK yanlış/placeholder durumda bırakıldı.
+    -- ★ DÜZELTİLDİ: eski koordinat (2001.6, 3820.9) doğrulanmamış bir
+    -- tahmindi ve oyuncuyu Sandy Shores'ta açık havaya ışınlıyordu. Trevor'ın
+    -- treyleri FiveM'in bilinen "kırık/delikli interior" listesinde olduğu
+    -- için düz bir RequestIpl ile de doğru render OLMAZ — bu yüzden artık
+    -- 'bob74_ipl' kaynağının (https://github.com/Bob74/bob74_ipl) resmi
+    -- GetTrevorsTrailerObject() API'si kullanılıyor (bkz. client/
+    -- trap_house_client.lua). SUNUCUDA 'bob74_ipl' KURULU OLMALI VE
+    -- server.cfg'de 'start bob74_ipl' SATIRI BULUNMALI — aksi halde
+    -- client konsoluna bir uyarı basılır ve oyuncu yine açık havada kalır.
+    -- Koordinat (Bob74/bob74_ipl wiki'sinden doğrulandı): X:1985.48132
+    -- Y:3828.76757 Z:32.5. Heading/iç mekan yerleşimi (Workbench/Packaging/
+    -- Exit) TAHMİNİDİR — küçük bir treyler içi olduğundan kapıya yakın,
+    -- birbirinden 1-2m ayrık noktalar seçildi; oyunda içeri girip
+    -- gözlemledikten sonra bu üç nokta ve EnterCoords.w (heading) rahatça
+    -- ince ayarlanabilir (yalnızca sayı değişikliği, kod değişikliği gerekmez).
     Shell = {
-        RequiredIpl  = 'trailertrash_i2',
-        EnterCoords  = vector4(2001.6, 3820.9, 32.3, 90.0),
-        WorkbenchPos = vector3(2000.9, 3818.6, 32.3),
-        PackagingPos = vector3(2003.4, 3819.4, 32.3),
-        ExitCoords   = vector4(2001.6, 3820.9, 32.3, 270.0)
+        UseBob74TrevorsTrailer = true, -- ★ client/trap_house_client.lua bu bayrağı okur
+        EnterCoords  = vector4(1985.48132, 3828.76757, 32.5, 0.0),
+        WorkbenchPos = vector3(1986.3, 3829.3, 32.5),
+        PackagingPos = vector3(1984.6, 3829.8, 32.5),
+        ExitCoords   = vector4(1985.48132, 3828.76757, 32.5, 180.0)
     },
 
     -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC
