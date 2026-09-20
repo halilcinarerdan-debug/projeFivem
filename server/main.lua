@@ -1256,6 +1256,18 @@ local function SafeForwardCoords(src, distance)
     )
 end
 
+-- /coords - anlık konum + heading'i chat'e basar, /traphouseekle [label]
+-- [x] [y] [z], /korbolgetest [x] [y] [z] gibi komutlara veya Config.Market.
+-- Zones / Config.Supplier.DeadDrops içine yapıştırılabilir formatta.
+RegisterCommand('coords', function(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then Reply(src, 'Ped bulunamadi.'); return end
+    local c  = GetEntityCoords(ped)
+    local hd = GetEntityHeading(ped)
+    Reply(src, ('X:%.3f Y:%.3f Z:%.3f Heading:%.1f'):format(c.x, c.y, c.z, hd))
+    Reply(src, ('vector3(%.3f, %.3f, %.3f)'):format(c.x, c.y, c.z))
+end, false)
+
 RegisterCommand('botyarat', function(src, args)
     local name = args[1]
     local role = args[2] or 'runner'
