@@ -939,7 +939,30 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatc
     end
 
     local origin = bot.state.coords
-    if not IsValidCoords(origin) then return false, 'no_origin' end
+    if not IsValidCoords(origin) then
+        -- ★ Bot hiç fiziksel olarak var olmadıysa (yeni /botyarat edildi VEYA
+        -- sunucu yeniden başlatılıp DB'den taze yüklendi — main.lua
+        -- LoadBotsFromDatabase coords'u BİLİNÇLİ OLARAK nil bırakır) bot'un
+        -- kalıcı bir konumu yoktur. Önceden bu durumda sevk KALICI OLARAK
+        -- reddediliyordu (kullanıcı önce ayrı bir /botspawn yapmak zorundaydı).
+        -- Artık dispatcherSrc (komutu veren oyuncu) varsa, onun ANLIK konumu
+        -- botun başlangıç noktası olarak kullanılır — BeginPhysicalDispatch
+        -- zaten origin'de gerçek bir ped/araç yaratıyor, bu yüzden bot
+        -- "önceden spawn edilmiş" olmak ZORUNDA değildir. dispatcherSrc yoksa
+        -- (örn. konsoldan/export'tan çağrıldıysa) eski davranış (no_origin
+        -- reddi) AYNEN korunur.
+        if type(dispatcherSrc) == 'number' and dispatcherSrc > 0 then
+            local ped = GetPlayerPed(dispatcherSrc)
+            if ped and ped ~= 0 then
+                local c = GetEntityCoords(ped)
+                origin = vector3(c.x, c.y, c.z)
+                Matrix.Log('LOGISTICS',
+                    '[ORIJIN VARSAYILANI] Bot #%d hic konumlanmamisti; dispatcher src=%d konumu baslangic olarak kullanildi.',
+                    botId, dispatcherSrc)
+            end
+        end
+        if not IsValidCoords(origin) then return false, 'no_origin' end
+    end
 
     local destOk, destReason, destExtra = ValidateDestination(origin, destination)
     if not destOk then
