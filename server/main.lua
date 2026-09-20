@@ -38,6 +38,19 @@
 --        bültene çevirme işi TAMAMEN client/hud.lua'da yapılır ("Sıfır Sayı
 --        Standardı"). Sunucu konsolu (print/Matrix.Log) ve /matrixdump bu
 --        köprüden ETKİLENMEZ, ham float dökmeye devam eder.
+--   [H14] SUNUCU TARAFI PED SPAWN ANTI-CRASH GUARD: 'SetEntityAsMissionEntity'
+--        SUNUCU LUA ORTAMINDA TANIMLI DEĞİLDİR (client-only native) — çağrılırsa
+--        'attempt to call a nil value' hatasıyla script'i ve canlanma döngüsünü
+--        kilitler. Bu sürümde TAMAMEN KALDIRILDI. Kalıcılık/ağ mühürleme artık
+--        CreatePed/CreateVehicle/CreatePedInsideVehicle'ın kendi
+--        (isNetwork=true, bScriptHostPed=true) bayrakları + doğrulama
+--        sonrası 'SetEntityOrphanMode(entity, 2)' [KeepEntity — server'ın
+--        entity'yi asla silmemesini garanti eden resmi CFX server-side
+--        native'i] ile kurulur. Ayrıca tüm dealer/dispatch ped'leri artık
+--        rol bazlı fallback zincirinden (Config.RoleModels/DefaultRoleModel)
+--        TAMAMEN AYRIŞTIRILMIŞ, sabit DEALER_PED_MODEL_HASH ('g_m_y_famdnf_01'
+--        — kapüşonlu sokak dealer skin'i) kullanır; hiçbir fallback modeline
+--        izin verilmez.
 -- =====================================================================
 
 -- ---------- Upvalue localization (perf) ----------
@@ -59,7 +72,11 @@ local CreatePedInsideVehicle    = CreatePedInsideVehicle
 local CreateVehicle             = CreateVehicle
 local DoesEntityExist           = DoesEntityExist
 local DeleteEntity              = DeleteEntity
-local SetEntityAsMissionEntity  = SetEntityAsMissionEntity
+-- ★ [H14] SetEntityAsMissionEntity KASITLI OLARAK localize EDİLMEZ: bu
+-- native sunucu Lua ortamında TANIMLI DEĞİLDİR (client-only) — burada bir
+-- upvalue olarak tutulması bile "kullanılabilir" izlenimi verir. Yerine
+-- SetEntityOrphanMode (server-safe, kalıcılık için resmi CFX native'i).
+local SetEntityOrphanMode       = SetEntityOrphanMode
 local SetEntityCoords           = SetEntityCoords
 local SetEntityCoordsNoOffset   = SetEntityCoordsNoOffset
 local GetHashKey                = GetHashKey
@@ -89,6 +106,15 @@ Matrix.Dispatches = Matrix.Dispatches or {}
 Matrix.QBX = exports.qbx_core
 
 local PENDING_EVENTS_MAX = 64
+
+-- =====================================================================
+-- ★ [H14] KRİTİK ANTI-CRASH GUARD: SUNUCU TARAFI PED SPAWN KISITLAMASI
+-- Tüm dealer/dispatch ped spawn'ları bu SABİT hash'i kullanır. Rol bazlı
+-- Config.RoleModels/Config.DefaultRoleModel zincirine KASITLI olarak HİÇ
+-- başvurulmaz — ciddiyetsiz/uygunsuz skin fallback'ini kökten engeller.
+-- =====================================================================
+local DEALER_PED_MODEL_NAME = 'g_m_y_famdnf_01' -- Street Dealer / Hooded Runner Skin
+local DEALER_PED_MODEL_HASH = GetHashKey(DEALER_PED_MODEL_NAME)
 
 -- =====================================================================
 -- CORE MATHEMATICS
@@ -509,19 +535,21 @@ function Matrix.SpawnBot(id, coords)
         return false, 'bad_coords'
     end
 
-    local modelName = Config.RoleModels[bot.role] or Config.DefaultRoleModel
-    local modelHash = GetHashKey(modelName)
+    local modelHash = DEALER_PED_MODEL_HASH
     local x, y, z   = coords.x, coords.y, coords.z
     local heading   = coords.w or 0.0
 
-    local ped = CreatePed(4, modelHash, x, y, z, heading, true, false)
+    -- ★ [H14] ANTI-CRASH GUARD: SetEntityAsMissionEntity SUNUCUDA ÇAĞRILMAZ
+    -- (client-only native → nil value → script kilitlenir). Kalıcılık/ağ
+    -- mühürleme CreatePed'in kendi bayrakları + SetEntityOrphanMode ile kurulur.
+    local ped = CreatePed(0, modelHash, x, y, z, heading, true, true)
     if not AwaitEntityCreation(ped) then
         SafeDeleteEntity(ped)
         Matrix.Log('CORE', '[HATA] Bot #%d OneSync ped doğrulaması zaman aşımı.', id)
         return false, 'timeout'
     end
 
-    SetEntityAsMissionEntity(ped, true, true)
+    pcall(SetEntityOrphanMode, ped, 2) -- KeepEntity: server entity'yi asla silmez
     local netId = NetworkGetNetworkIdFromEntity(ped)
 
     bot.state.spawned = true
@@ -529,7 +557,7 @@ function Matrix.SpawnBot(id, coords)
     bot.state.coords  = vector3(x, y, z)
 
     TriggerClientEvent('matrix:client:injectBot', -1, id, bot.role, coords, bot.dna_id, netId)
-    Matrix.Log('CORE', 'Bot #%d enjekte edildi [%s] NetID:%d', id, modelName, netId)
+    Matrix.Log('CORE', 'Bot #%d enjekte edildi [%s] NetID:%d', id, DEALER_PED_MODEL_NAME, netId)
     return true, netId
 end
 
@@ -662,20 +690,22 @@ end
 --- entity'ler DÜNYADAN SİLİNİR (bkz. [H8]) — davranış tek-hedef sürümüyle
 --- birebir aynıdır, yalnızca ortaklaştırılmıştır.
 local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstDestination)
-    local pedModelName = Config.RoleModels[bot.role] or Config.DefaultRoleModel
-    local pedHash      = GetHashKey(pedModelName)
-    local isFoot       = (vehicleType == 'foot')
+    -- ★ [H14] ANTI-CRASH GUARD: sabit model, rol bazlı fallback YOK.
+    local pedHash = DEALER_PED_MODEL_HASH
+    local isFoot  = (vehicleType == 'foot')
 
     local ped, vehicle
     local vehicleNetId = nil
 
     if isFoot then
-        ped = CreatePed(4, pedHash, origin.x, origin.y, origin.z, 0.0, true, false)
+        -- ★ [H14] SetEntityAsMissionEntity SUNUCUDA ÇAĞRILMAZ (client-only
+        -- native → nil value → script kilitlenir).
+        ped = CreatePed(0, pedHash, origin.x, origin.y, origin.z, 0.0, true, true)
         if not AwaitEntityCreation(ped) then
             SafeDeleteEntity(ped)
             return nil, nil, nil, nil, 'ped_spawn_timeout'
         end
-        SetEntityAsMissionEntity(ped, true, true)
+        pcall(SetEntityOrphanMode, ped, 2) -- KeepEntity: server entity'yi asla silmez
         SetEntityCoords(ped, origin.x, origin.y, origin.z, false, false, false, false)
 
         local taskOk = pcall(TaskGoStraightToCoord,
@@ -691,20 +721,23 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
         local vehModelName = DISPATCH_VEHICLE_MODELS[vehicleType] or DISPATCH_VEHICLE_MODELS.car
         local vehHash      = GetHashKey(vehModelName)
 
+        -- ★ [H14] SetEntityAsMissionEntity SUNUCUDA ÇAĞRILMAZ; kalıcılık
+        -- CreateVehicle'ın kendi (true, true) bayrakları + SetEntityOrphanMode
+        -- ile kurulur.
         vehicle = CreateVehicle(vehHash, origin.x, origin.y, origin.z, 0.0, true, true)
         if not AwaitEntityCreation(vehicle) then
             SafeDeleteEntity(vehicle)
             return nil, nil, nil, nil, 'vehicle_spawn_timeout'
         end
-        SetEntityAsMissionEntity(vehicle, true, true)
+        pcall(SetEntityOrphanMode, vehicle, 2) -- KeepEntity
 
-        ped = CreatePedInsideVehicle(vehicle, 4, pedHash, -1, true, false)
+        ped = CreatePedInsideVehicle(vehicle, 0, pedHash, -1, true, true)
         if not AwaitEntityCreation(ped) then
             SafeDeleteEntity(ped)
             SafeDeleteEntity(vehicle)
             return nil, nil, nil, nil, 'ped_in_vehicle_timeout'
         end
-        SetEntityAsMissionEntity(ped, true, true)
+        pcall(SetEntityOrphanMode, ped, 2) -- KeepEntity
 
         local taskOk = pcall(TaskVehicleDriveToCoord,
             ped,
