@@ -751,6 +751,16 @@ function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicle
         return false, 'corrupt_vector'
     end
 
+    -- ★ IŞINLANMA GUARD'I (ikinci katman): logistics.lua'nın ValidateDestination'ı
+    -- zaten bu kontrolü DispatchDealer akışında yapar, ama bu fonksiyon export
+    -- edilmiş olduğundan başka bir kod yolu doğrudan çağırabilir — bu yüzden
+    -- kural burada da AYNEN tekrarlanır: hedef nil/bozuksa (yukarıda zaten
+    -- reddedildi) veya origin-destination mesafesi min eşiğin altındaysa sevk
+    -- tamamen iptal edilir, oyuncunun dibine ASLA araç/bot ışınlanmaz.
+    if #(origin - destination) < Config.Logistics.MinDispatchDistanceMeters then
+        return false, 'too_close'
+    end
+
     -- Eğer bot zaten bir şekilde spawn'lıysa, önce temizle
     if bot.state.spawned then
         Matrix.DespawnBot(botId)

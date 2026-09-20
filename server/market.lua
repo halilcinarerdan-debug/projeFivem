@@ -647,6 +647,37 @@ AddEventHandler('playerDropped', function()
     HudViewers[source] = nil
 end)
 
+-- =====================================================================
+-- HUD: SAYISAL DEĞERLERİN ASKERİ/PSİKOLOJİK EŞİK METNİNE ÇEVRİMİ
+-- Oyuncuya HUD'da ÇİĞ ondalık (0.40, 0.85 vb.) hiç gösterilmez — yalnızca
+-- bu deterministik eşik metinleri basılır. Loglar/komutlar (ör. /botdurum,
+-- /matrixdump) KASITLI OLARAK etkilenmez: tasarımcı dengeleme (bkz.
+-- shared/config.lua "YARILANMA ÖMRÜ" türetmeleri) hâlâ tam ondalık hassasiyet
+-- gerektirir; bu çevrim SADECE oyuncuya sunulan atmosferik telemetri katmanı
+-- için geçerlidir.
+-- =====================================================================
+local function FormatCortisolThreshold(value)
+    value = tonumber(value) or 0.0
+    if value < 0.20 then
+        return '[NABIZ: SOĞUKKANLI SUBAY]'
+    elseif value <= 0.60 then
+        return '[NABIZ: ANKSİYETE BAŞLANGICI — TETİKTE]'
+    else
+        return '[NABIZ: AKUT PANİK ATAK KRİZİ — ELLERİN TİTRİYOR]'
+    end
+end
+
+local function FormatFatigueThreshold(value)
+    value = tonumber(value) or 0.0
+    if value < 0.30 then
+        return '[KONDİSYON: DİNÇ]'
+    elseif value <= 0.80 then
+        return '[KONDİSYON: KRONİK BİTKİNLİK]'
+    else
+        return '[KONDİSYON: NÖRON HASARI SINIRI — BEYİN SAKATLIĞI RİSKİ]'
+    end
+end
+
 local function FindNearestZoneCoordsForHud(coords)
     local nearestId, nearestDist = nil, math_huge
     for id, house in pairs(Matrix.TrapHouses or {}) do
@@ -674,6 +705,7 @@ function Matrix.Hud.BuildSnapshot(src)
     local heat   = (trapId and Matrix.Bureau and Matrix.Bureau.GetHeat and Matrix.Bureau.GetHeat(trapId)) or 0.0
 
     local cortisol = (state and state.biology and state.biology.cortisol_level) or 0.0
+    local fatigue  = (state and state.biology and state.biology.fatigue_level) or 0.0
 
     local botCount = 0
     for _ in pairs(Matrix.Bots or {}) do botCount = botCount + 1 end
@@ -688,7 +720,8 @@ function Matrix.Hud.BuildSnapshot(src)
             and ('BOLGE:#%d DESIFRE:%.2f SIZINTI:%.2f SESSIZLIK:%s'):format(trapId, house.decryption_confidence, heat, tostring(silent))
             or 'BOLGE: BILINMIYOR' },
         { text = '[BIYOLOJIK PROFIL]', header = true },
-        { text = ('KORTIZOL:%.2f'):format(cortisol) },
+        { text = FormatCortisolThreshold(cortisol) },
+        { text = FormatFatigueThreshold(fatigue) },
         { text = '[SAHA OPERASYONU]', header = true },
         { text = ('AKTIF-BOT:%d  SEVKIYAT:%d'):format(botCount, dispatchCount) }
     }

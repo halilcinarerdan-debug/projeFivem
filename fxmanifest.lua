@@ -4,7 +4,7 @@ lua54 'yes'
 
 author 'projeFivem'
 description 'Katman 1-2-3-4-5 Birlesik Motor: Core Matrix, Adli Balistik, Recruitment, The Bureau, Mutfak & Psikoloji Simulasyonu, Programli Lojistik Sevk, Qbox Co-op Kartel Hiyerarsisi & Bolgesel Piyasa, Monokrom Taktik HUD'
-version '1.2.0'
+version '1.2.1'
 
 shared_scripts {
     '@ox_lib/init.lua',
@@ -27,6 +27,7 @@ server_scripts {
 }
 
 dependencies {
+    'ox_lib',
     'qbx_core',
     'oxmysql',
     'ox_inventory'

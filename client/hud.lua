@@ -72,6 +72,98 @@ AddEventHandler('onClientResourceStart', function(resourceName)
 end)
 
 -- =====================================================================
+-- TAKTİK KOMUTA MENÜSÜ (ox_lib Context Menu, F10) — KATMAN 5
+--
+-- Amaç: chat'e komut yazma zorunluluğunu bitirmek. Sık kullanılan 4 komut
+-- (/sevket, /traphousedurum, /rutbeata, /matrixdump) tek tıkla, saf metin
+-- tabanlı ox_lib context menu üzerinden tetiklenir.
+--
+-- MİMARİ: Bu menü YENİ hiçbir server event'i EKLEMEZ; sadece ExecuteCommand
+-- ile mevcut RegisterCommand komutlarını (bkz. server/logistics.lua,
+-- bureau.lua, market.lua, main.lua) AYNEN tetikler — yetki kontrolleri
+-- (HasCommandAuthority vb.) komutun kendi içinde zaten çalıştığından bu
+-- menü hiçbir yetkilendirmeyi BYPASS ETMEZ; sadece bir "hızlı yazma"
+-- kısayolu, 0 Resmon (ekstra thread/tick yok, sadece tıklama-anı çağrısı).
+-- =====================================================================
+local function OpenSevketDialog()
+    local input = lib.inputDialog('/sevket - Fiziksel Dealer Sevki', {
+        { type = 'number', label = 'Bot ID', description = 'Sevk edilecek dealer botunun ID numarasi', required = true },
+        { type = 'input',  label = 'Plaka (bos = kalici arac/foot)', required = false }
+    })
+    if not input or not input[1] then return end
+
+    local vehicleRef = (input[2] and tostring(input[2]) ~= '') and tostring(input[2]) or ''
+    ExecuteCommand(('sevket %s %s'):format(tostring(input[1]), vehicleRef))
+end
+
+local function OpenTrapHouseDurumDialog()
+    local input = lib.inputDialog('/traphousedurum - Trap House Sorgusu', {
+        { type = 'number', label = 'Trap House ID', required = true }
+    })
+    if not input or not input[1] then return end
+
+    ExecuteCommand(('traphousedurum %s'):format(tostring(input[1])))
+end
+
+local function OpenRutbeAtaDialog()
+    local input = lib.inputDialog('/rutbeata - Hiyerarsi Rutbe Atamasi', {
+        { type = 'number', label = 'Hedef Server ID', required = true },
+        { type = 'select', label = 'Rutbe', required = true, options = {
+            { value = 'Leader',            label = 'Leader (Baron)' },
+            { value = 'Logistics_Officer', label = 'Logistics_Officer (Lojistik Subayi)' },
+            { value = 'Chemist',           label = 'Chemist (Kimyager)' }
+        } }
+    })
+    if not input or not input[1] or not input[2] then return end
+
+    ExecuteCommand(('rutbeata %s %s'):format(tostring(input[1]), tostring(input[2])))
+end
+
+local function OpenMatrixDump()
+    ExecuteCommand('matrixdump')
+end
+
+local function OpenTacticalMenu()
+    lib.registerContext({
+        id = 'matrix_tactical_menu',
+        title = '=== TAKTIK KOMUTA MENUSU ===',
+        options = {
+            {
+                title       = '/sevket',
+                description = 'Dealer botunu fiziksel sevke al (rutbe yetkisi gerekir)',
+                icon        = 'route',
+                onSelect    = OpenSevketDialog
+            },
+            {
+                title       = '/traphousedurum',
+                description = 'Trap house desifre/heat/duzenlilik durumunu sorgula',
+                icon        = 'house-signal',
+                onSelect    = OpenTrapHouseDurumDialog
+            },
+            {
+                title       = '/rutbeata',
+                description = 'Bir oyuncuya hiyerarsi rutbesi ata (rutbe yetkisi gerekir)',
+                icon        = 'user-shield',
+                onSelect    = OpenRutbeAtaDialog
+            },
+            {
+                title       = '/matrixdump',
+                description = 'Tum bot matrisini (biyoloji/psikoloji) dokum et',
+                icon        = 'terminal',
+                onSelect    = OpenMatrixDump
+            }
+        }
+    })
+    lib.showContext('matrix_tactical_menu')
+end
+
+RegisterCommand('taktikmenu', function()
+    OpenTacticalMenu()
+end, false)
+
+RegisterKeyMapping('taktikmenu', 'Taktik Komuta Menusunu Ac', 'keyboard', 'F10')
+
+-- =====================================================================
 -- RENDER THREAD — HUD kapalıyken Wait(500) (neredeyse 0ms), açıkken
 -- Wait(0) (DrawText'in gerektirdiği per-frame çağrı).
 -- =====================================================================

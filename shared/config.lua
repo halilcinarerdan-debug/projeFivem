@@ -233,6 +233,12 @@ Config.Logistics = {
     -- Sevk hedefinin origin'e olan mesafesi bu limiti aşarsa "menzil dışı" reddi.
     MaxDispatchRangeMeters = 6000.0,
 
+    -- Origin ile hedef arasındaki mesafe bu değerin ALTINDAYSA (nil hedef dahil)
+    -- sevk tamamen İPTAL edilir: oyuncunun dibine araç/bot "ışınlanmasını"
+    -- (dejenere sıfır-mesafe spawn) önler. bkz. logistics.lua ValidateDestination
+    -- ve main.lua Matrix.BeginPhysicalDispatch (çift katmanlı guard).
+    MinDispatchDistanceMeters = 5.0,
+
     -- Telekomünikasyon kör noktaları: bu koordinat + yarıçap içine giren dealer'ın
     -- komuta paneliyle sinyali kopar; olaylar kör bölgeden çıkana kadar gecikmeli iletilir.
     DeadZones = {

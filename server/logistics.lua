@@ -176,6 +176,12 @@ local function ValidateDestination(origin, destination)
         if dist > Config.Logistics.MaxDispatchRangeMeters then
             return false, 'out_of_range', dist
         end
+        -- ★ IŞINLANMA GUARD'I: origin/destination dejenere derecede yakınsa
+        -- (ör. oyuncunun kendi konumu origin fallback'i olduğunda) sevk
+        -- tamamen iptal edilir; bot/araç ASLA oyuncunun dibinde spawn olmaz.
+        if dist < Config.Logistics.MinDispatchDistanceMeters then
+            return false, 'too_close', dist
+        end
     end
     return true
 end
@@ -1118,6 +1124,7 @@ local DISPATCH_FAILURE_MESSAGES = {
     missing_vector              = 'Hedef koordinatı eksik.',
     corrupt_vector              = 'Hedef koordinatı bozuk/geçersiz.',
     out_of_range                = 'Hedef menzil dışında.',
+    too_close                   = 'Hedef mesafesi çok yakın (min. 5m); sevk iptal edildi.',
     vehicle_not_found            = 'Belirtilen plaka filoda kayıtlı değil.',
     vehicle_assigned_elsewhere  = 'Araç başka bir bota kalıcı olarak atanmış.',
     vehicle_in_use              = 'Araç şu anda başka bir sevkiyatta kullanılıyor.',
