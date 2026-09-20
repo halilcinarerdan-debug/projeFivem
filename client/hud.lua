@@ -102,17 +102,30 @@ local function SanitizeRankArg(v)
     return s
 end
 
---- ★ [E2] Waypoint arg: "x,y,z" vektör YA DA salt tam sayı Trap House ID.
---- Her iki biçim de yalnızca [rakam, nokta, virgül, eksi] karakterlerinden
---- oluşur — boşluk/quote/semicolon/harf İÇEREN hiçbir girdi kabul edilmez.
---- Format çözümlemesi (trap house mı, koordinat mı) sunucu tarafında yapılır;
---- client yalnızca karakter kümesini ve uzunluğu doğrular.
+--- ★ [E2] Waypoint arg: "x,y,z" / "x, y, z" / "x y z" (/coords çıktısı
+--- boşlukla gelir) vektörü YA DA salt tam sayı Trap House ID kabul eder.
+--- Kabul edilen karakter kümesi yalnızca [rakam, nokta, virgül, eksi,
+--- boşluk] — harf/quote/semicolon İÇEREN hiçbir girdi kabul edilmez.
+--- ExecuteCommand tek bir argüman bekler (boşluk argümanı BÖLER), bu yüzden
+--- kabul edilen boşluklar/virgüller BURADA tek bir "," ayracına normalize
+--- edilir; döndürülen string ASLA boşluk içermez. Format çözümlemesi
+--- (trap house mu, koordinat mı) sunucu tarafında yapılır; client yalnızca
+--- karakter kümesini, uzunluğu ve normalize edilmiş biçimi doğrular.
 local function SanitizeWaypointArg(v)
     if v == nil then return nil end
     local s = tostring(v)
+    s = s:match('^%s*(.-)%s*$') -- baş/son boşlukları kırp
     if s == '' then return nil end
     if #s > MAX_WAYPOINT_LEN then return nil end
-    if s:find('[^%d%.,%-]') then return nil end
+    -- Yalnızca rakam/nokta/virgül/eksi/boşluk — başka HİÇBİR karakter kabul edilmez.
+    if s:find('[^%d%.,%-%s]') then return nil end
+
+    -- "x y z" / "x, y , z" gibi karışık ayraçları TEK "," ayracına indir.
+    s = s:gsub('%s+', ','):gsub(',+', ',')
+    s = s:match('^,*(.-),*$') -- baş/son ayraçları temizle
+
+    if s == '' then return nil end
+    if #s > MAX_WAYPOINT_LEN then return nil end
     return s
 end
 
@@ -340,22 +353,22 @@ local function OpenRotaCizDialog()
         },
         {
             type = 'input', label = '1. Ugrak Noktasi',
-            description = 'vector3 "x,y,z" VEYA Trap House ID',
+            description = '"x,y,z" veya "x y z" VEYA Trap House ID',
             required = true, max = MAX_WAYPOINT_LEN
         },
         {
             type = 'input', label = '2. Ugrak Noktasi',
-            description = 'vector3 "x,y,z" VEYA Trap House ID',
+            description = '"x,y,z" veya "x y z" VEYA Trap House ID',
             required = true, max = MAX_WAYPOINT_LEN
         },
         {
             type = 'input', label = '3. Ugrak Noktasi',
-            description = 'vector3 "x,y,z" VEYA Trap House ID',
+            description = '"x,y,z" veya "x y z" VEYA Trap House ID',
             required = true, max = MAX_WAYPOINT_LEN
         },
         {
             type = 'input', label = 'Final Hedef (Ana Us)',
-            description = 'vector3 "x,y,z" VEYA Trap House ID',
+            description = '"x,y,z" veya "x y z" VEYA Trap House ID',
             required = true, max = MAX_WAYPOINT_LEN
         },
         {
@@ -376,7 +389,7 @@ local function OpenRotaCizDialog()
     for i = 2, 5 do
         local wp = SanitizeWaypointArg(input[i])
         if not wp then
-            NotifyInvalidInput(('Uğrak/Hedef #%d geçersiz (yalnızca rakam, ".", "," , "-").'):format(i - 1))
+            NotifyInvalidInput(('Uğrak/Hedef #%d geçersiz (yalnızca rakam, ".", ",", "-", bosluk).'):format(i - 1))
             return
         end
         waypoints[#waypoints + 1] = wp
