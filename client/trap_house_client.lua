@@ -141,30 +141,23 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
     insideTrapHouse = data.trap_house_id
     shellData        = data
 
-    -- ★ SIRA KRİTİK: 'bob74_ipl' (https://github.com/Bob74/bob74_ipl) interior
-    -- proxy'sini PIN'lemesi, oyuncuyu ORAYA IŞINLAMADAN ÖNCE bitmiş olmalı.
-    -- Trevor'ın treyleri FiveM'in bilinen "kırık/delikli interior" listesinde
-    -- olduğundan, oyun motoru bu interior'ı yalnızca bob74_ipl onu ZORLA
-    -- pin'lediğinde render eder — önce ışınlayıp SONRA pin'lersek oyuncu o an
-    -- interior henüz yüklenmemişken açık/boş hali görür (bildirilen "blip
-    -- üzerine ışınlandım ama içeri değil" belirtisi tam olarak budur). Bu
-    -- yüzden Interior.Set çağrısından sonra kısa bir Wait ile oyun motoruna
-    -- proxy'yi pin'lemesi için bir kaç frame payı verilir.
-    -- Sunucuda bu kaynak KURULU + BAŞLATILMIŞ (server.cfg -> "start
-    -- bob74_ipl") DEĞİLSE export bulunamaz — bu durumda oyuncuya hiçbir
-    -- şey KIRILMAZ (pcall korumalı), yalnızca client konsoluna açık bir
-    -- uyarı basılır ki sorun "sessizce açık havada kalmak" yerine hemen
-    -- teşhis edilebilsin.
-    if data.use_bob74_trevors_trailer then
-        local ok, trailerObj = pcall(function() return exports['bob74_ipl']:GetTrevorsTrailerObject() end)
-        if ok and type(trailerObj) == 'table' and trailerObj.Interior and trailerObj.Interior.Set then
-            pcall(trailerObj.Interior.Set, trailerObj.Interior.trash)
-            Wait(300)
-        else
-            print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya baslatilmamis -- Trevor\'in treyleri dogru render OLMAYACAK. Sunucuya bob74_ipl kurup server.cfg icine "start bob74_ipl" ekleyin: https://github.com/Bob74/bob74_ipl')
-        end
-    end
-
+    -- ★ DÜZELTME: bob74_ipl'in gerçek kaynak kodu incelendi — Trevor'ın
+    -- treyleri bob74_ipl'in KENDİ client.lua'sında KENDİ resource start'ında
+    -- OTOMATİK olarak `TrevorsTrailer.LoadDefault()` ile "trash" durumuna
+    -- getirilip natif `RefreshInterior()` ile render'a uygulanıyor.
+    -- `RefreshInterior` bob74_ipl içinde salt bir GLOBAL'dir, exports ile DIŞA
+    -- AÇILMAZ — yani buradan Interior.Set() çağırsak bile ardından bir
+    -- refresh TETİKLEYEMEYİZ. Böyle bir çağrı (eskiden burada vardı) olsa
+    -- olsa bob74_ipl'in başlangıçta zaten doğru uyguladığı refresh'i BOZAR:
+    -- Interior.Set() önce Clear() ile interior'ı gizler, ardından refresh'siz
+    -- Enable() render'a hiç yansımayabilir — tam olarak bildirilen "blip
+    -- üzerine ışınlandım ama içerisi yok" belirtisiyle örtüşüyor. Bu yüzden
+    -- burada ARTIK Interior.Set() ÇAĞRILMAZ; bob74_ipl'in kendi otomatik
+    -- "trash" varsayılanına güvenilir (zaten istenen "hafif kirli/dağınık"
+    -- görünüm budur). Sunucuda bob74_ipl KURULU + BAŞLATILMIŞ (server.cfg ->
+    -- "start bob74_ipl") DEĞİLSE bu resource zaten hiç başlamaz (fxmanifest
+    -- dependencies), dolayısıyla burada ayrıca bir varlık kontrolüne gerek
+    -- yoktur.
     local enter = data.enter_coords
     if enter then
         SetEntityCoords(PlayerPedId(), enter.x, enter.y, enter.z, false, false, false, false)

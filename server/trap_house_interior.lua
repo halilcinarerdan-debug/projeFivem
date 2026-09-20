@@ -182,7 +182,6 @@ RegisterNetEvent('matrix:server:trapHouseInterior:enter', function(trapHouseId)
         workbench_pos = shell.WorkbenchPos,
         packaging_pos = shell.PackagingPos,
         exit_coords   = shell.ExitCoords,
-        use_bob74_trevors_trailer = shell.UseBob74TrevorsTrailer,
         resident_bots = GetResidentBots(trapHouseId),
         ambient_scenarios = Config.TrapHouseInterior.AmbientScenarios
     })
