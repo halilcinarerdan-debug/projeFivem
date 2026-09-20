@@ -115,8 +115,23 @@ RegisterNetEvent('matrix:server:trapHouseInterior:enter', function(trapHouseId)
     end
 
     local state = Matrix.GetOrCreatePlayerState(src)
-    if not HasMembership(state and state.citizenid) then
+    local citizenid = state and state.citizenid
+
+    -- ★ TEŞHİS: iki farklı red nedenini (profil çözülemedi / gerçekten
+    -- rütbesiz) birbirinden ayırıp konsola basar — ikisi de oyuncuya AYNI
+    -- "kilitli" mesajını gösterse de (bilgi sızdırmamak için), server
+    -- konsolunda TAM sebep görülür.
+    if not citizenid then
         Reply(src, 'Bu kapı size kilitli — örgüt hiyerarşisinde kayıtlı değilsiniz.')
+        Matrix.Log('TRAPHOUSE', '[GIRIS RED] src=%d -> citizenid cozulemedi (QBX player state yok).', src)
+        return
+    end
+
+    if not HasMembership(citizenid) then
+        local rank = Matrix.Hierarchy and Matrix.Hierarchy.GetRank and Matrix.Hierarchy.GetRank(citizenid)
+        Reply(src, 'Bu kapı size kilitli — örgüt hiyerarşisinde kayıtlı değilsiniz.')
+        Matrix.Log('TRAPHOUSE', '[GIRIS RED] src=%d citizenid=%s -> Matrix.Hierarchy.GetRank sonucu: %s',
+            src, citizenid, tostring(rank))
         return
     end
 
