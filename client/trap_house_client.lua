@@ -18,6 +18,21 @@ local insideTrapHouse = nil -- şu an içinde bulunulan trap house id (yoksa nil
 local shellData        = nil -- teleportIn payload'ından gelen iç mekan verisi
 local residentPeds     = {} -- o an içeride görünen GERÇEK bot temsilleri (kozmetik degil)
 
+-- ★ EnterCoords ile ExitCoords AYNI fiziksel nokta (yalnızca heading farklı,
+-- kapı = hem giriş hem çıkış). Bu yüzden içeri her girişte oyuncu ANINDA
+-- çıkış tetiğinin de üzerinde buluyor kendini -- teleportIn'in ekran
+-- kararması/interior bekleme dizisi (birkaç saniye sürebilir) sırasında
+-- sabırsızlıkla E'ye basılırsa, ekran açılır açılmaz o basış (veya elde
+-- kalan bir sonraki basış) anında "Disari Cik"ı tetikleyip oyuncuyu geri
+-- dışarı fırlatıyordu ("E tusu gitti" siddiasinin gercek nedeni: teleportIn
+-- hicbir zaman tamamlanmiyor degil, tamamlaniyor ama hemen ardindan tekrar
+-- disari cikiliyordu). Koordinatlari degistirmek yerine (oda sekli bilinmedigi
+-- icin risk), giristen sonra kisa bir sure cikis bolgesini yok sayiyoruz --
+-- Enter/Exit ayni kalir, kullanicinin "ayni yerde kalsin" istegine sadik
+-- kalinir.
+local ENTRY_EXIT_GRACE_MS = 3000
+local ignoreExitZoneUntil = 0
+
 -- ★ server/main.lua'nın DEALER_PED_MODEL_HASH'iyle (DEALER_PED_MODEL_NAME =
 -- 'g_m_y_famdnf_01') KASITLI OLARAK AYNI model. Bir bot burada göründüğünde
 -- oyuncunun sahada gördüğü GERÇEK dealer skin'inden farklı görünmemeli —
@@ -209,6 +224,11 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         end
 
         DoScreenFadeIn(300)
+
+        -- ★ Ekran açıldıktan SONRA sayaç başlar -- uzun kararma sırasında
+        -- sabırsızlıkla basılan E'nin, tam bu noktada (kapıda/çıkış
+        -- tetiğinde) hemen "Disari Cik"ı ateşlemesini engeller.
+        ignoreExitZoneUntil = GetGameTimer() + ENTRY_EXIT_GRACE_MS
     end
 
     -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC'ler
@@ -302,7 +322,7 @@ CreateThread(function()
             -- uğraşmak istemediği için) çift tetikleme YAPISAL olarak
             -- imkansız hale getirildi.
             local zone, zoneDist = nil, INTERACT_RADIUS
-            if shellData.exit_coords then
+            if shellData.exit_coords and GetGameTimer() >= ignoreExitZoneUntil then
                 local d = VDist(coords, shellData.exit_coords)
                 if d <= zoneDist then zone, zoneDist = 'exit', d end
             end
