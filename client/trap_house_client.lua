@@ -29,6 +29,11 @@ local RESIDENT_BOT_PED_MODEL = 'g_m_y_famdnf_01'
 local sellerPeds  = {} -- handoffId -> { entity, coords, radius }
 local ambushPeds  = {}
 
+-- ★ Tezgah kolizyonsuz görsel prop -- saf dekor, "burada bir tezgah var"
+-- hissi için; oyuncu içinden yürüyüp geçebilir (kasıtlı, kullanıcı isteği).
+local WORKBENCH_PROP_MODEL = 'prop_tool_bench02'
+local workbenchProp = nil
+
 -- =====================================================================
 -- YARDIMCI ÇİZİM (monokrom, DrawText — client/hud.lua DrawMonoLine ile
 -- AYNI görsel dil, ayrı bir dosya olduğu için küçük bir yerel kopya).
@@ -245,6 +250,27 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         end)
     end
 
+    -- ★ Tezgah prop'u: saf görsel dekor, kolizyonsuz (oyuncu isteği --
+    -- "prop koyar mısın kolizyonsuz workbench için"). SetEntityCollision
+    -- false yapınca yerçekimi hala etkiliyken çarpışma olmayacağından prop
+    -- yere düşer gibi davranabilir; FreezeEntityPosition ile sabitlenir.
+    if data.workbench_pos then
+        CreateThread(function()
+            local model = RequestModelSync(WORKBENCH_PROP_MODEL)
+            if not model then return end
+
+            local pos = data.workbench_pos
+            local obj = CreateObject(model, pos.x, pos.y, pos.z, false, false, false)
+            if obj and obj ~= 0 then
+                SetEntityCollision(obj, false, false)
+                FreezeEntityPosition(obj, true)
+                SetEntityAsMissionEntity(obj, true, true)
+                workbenchProp = obj
+            end
+            SetModelAsNoLongerNeeded(model)
+        end)
+    end
+
     if lib and lib.notify then
         lib.notify({ title = '[TRAP HOUSE]', description = 'Kapidan icerisi girildi. Cikmak icin kapiya donup [E] tuslayin.', type = 'inform' })
     end
@@ -259,8 +285,16 @@ local function CleanupResidentPeds()
     residentPeds = {}
 end
 
+local function CleanupWorkbenchProp()
+    if workbenchProp and DoesEntityExist(workbenchProp) then
+        pcall(DeleteEntity, workbenchProp)
+    end
+    workbenchProp = nil
+end
+
 RegisterNetEvent('matrix:client:trapHouseInterior:teleportOut', function(data)
     CleanupResidentPeds()
+    CleanupWorkbenchProp()
     insideTrapHouse = nil
     shellData        = nil
 
@@ -273,6 +307,7 @@ end)
 AddEventHandler('onClientResourceStop', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     CleanupResidentPeds()
+    CleanupWorkbenchProp()
 end)
 
 -- =====================================================================

@@ -545,19 +545,29 @@ Config.TrapHouseInterior = {
     -- sağlıyor. Koordinat (bob74_ipl'in kendi client.lua'sındaki yorumdan
     -- doğrulandı): X:261.4586 Y:-998.8196 Z:-99.00863 — bu, apartman
     -- interior'larının paylaştığı ayrı/yeraltı "interior cebi" konumudur
-    -- (normal harita ile çakışmaz). Heading/iç mekan yerleşimi (Workbench/
-    -- Packaging/Exit) TAHMİNİDİR — küçük bir stüdyo dairesi olduğundan
-    -- kapıya yakın, birbirinden 1-2m ayrık noktalar seçildi; oyunda içeri
-    -- girip gözlemledikten sonra bu üç nokta ve EnterCoords.w (heading)
-    -- rahatça ince ayarlanabilir (yalnızca sayı değişikliği, kod değişikliği
-    -- gerekmez). İnteriorun yine de render OLMAMASI durumunda client/
+    -- (normal harita ile çakışmaz).
+    --
+    -- ★ DÜZELTME (canlı testte bulundu): Workbench/Packaging ilk başta
+    -- kapıya yalnızca 1-2m uzaktaydı — client/trap_house_client.lua'nın
+    -- INTERACT_RADIUS'u (2.0m) bu üç noktanın etkileşim alanlarını
+    -- ÇAKIŞTIRIYORDU: tezgaha basmak için E'ye basınca oyuncu AYNI ANDA
+    -- çıkış tetiğinin de menzilindeydi, tek bir IsControlJustPressed o
+    -- tick'teki HER `if` bloğunda true okunduğundan hem tamir hem çıkış
+    -- birlikte tetikleniyor, oyuncu dışarı fırlıyordu. Artık Workbench/
+    -- Packaging kapıdan 5m (2×INTERACT_RADIUS'un üzerinde, güvenli pay ile)
+    -- uzağa, birbirinden de yaklaşık 7m uzağa yerleştirildi. Kesin oda
+    -- şekli/duvarlar bilinmediğinden hâlâ TAHMİNİDİR — oyunda içeri girip
+    -- gözlemledikten sonra bu noktalar ve EnterCoords.w (heading) rahatça
+    -- ince ayarlanabilir (yalnızca sayı değişikliği, kod değişikliği
+    -- gerekmez), yalnızca ARALARINDAKİ mesafeyi 2×INTERACT_RADIUS'un altına
+    -- düşürmemeye dikkat edin. İnteriorun render OLMAMASI durumunda client/
     -- trap_house_client.lua'daki "/traphouseipldebug" teşhis komutu
     -- IsIplActive/GetInteriorAtCoords/IsInteriorReady sonuçlarını F8
     -- konsoluna basar.
     Shell = {
         EnterCoords  = vector4(261.4586, -998.8196, -99.00863, 0.0),
-        WorkbenchPos = vector3(262.4586, -997.8196, -99.00863),
-        PackagingPos = vector3(260.4586, -997.5196, -99.00863),
+        WorkbenchPos = vector3(266.4586, -998.8196, -99.00863),
+        PackagingPos = vector3(261.4586, -993.8196, -99.00863),
         ExitCoords   = vector4(261.4586, -998.8196, -99.00863, 180.0)
     },
 
