@@ -58,7 +58,7 @@ end
 -- =====================================================================
 -- KAPI BLIP'LERİ + GİRİŞ/ÇIKIŞ
 -- =====================================================================
-local function RefreshTrapHouseBlips()
+local function RefreshTrapHouseBlipsInner()
     local list = lib.callback.await('matrix:callback:getTrapHouseLocations', false)
     if type(list) ~= 'table' then return end
 
@@ -88,6 +88,19 @@ local function RefreshTrapHouseBlips()
             if house.blip then RemoveBlip(house.blip) end
             trapHouses[id] = nil
         end
+    end
+end
+
+-- ★ TEŞHİS/SAĞLAMLIK: lib.callback.await bir kere hata verirse (örn.
+-- sunucu callback'i henüz kaydetmeden ilk çağrı tetiklenirse) pcall'suz
+-- bir CreateThread'de bu, TÜM thread'i kalıcı olarak öldürür — kapı
+-- blip'leri/E-prompt'u bir daha ASLA görünmez (F8 konsolunda tek seferlik
+-- bir hata basar, sonra sessiz kalır). forensics.lua'nın LoadCaches'i
+-- (aynı .await() + pcall deseni) ile AYNI disiplin burada da uygulanır.
+local function RefreshTrapHouseBlips()
+    local ok, err = pcall(RefreshTrapHouseBlipsInner)
+    if not ok then
+        print(('[MATRIX:TRAPHOUSE:CLIENT] [HATA] RefreshTrapHouseBlips basarisiz (yutuldu, bir sonraki tick tekrar denenecek): %s'):format(tostring(err)))
     end
 end
 
