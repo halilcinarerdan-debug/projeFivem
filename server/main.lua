@@ -685,6 +685,19 @@ local function _SafeVec(v)
            and v.z ~= math_huge and v.z ~= -math_huge
 end
 
+--- ★ HATA DÜZELTMESİ: FiveM'in vector kütüphanesinde `#` (uzunluk/magnitude)
+--- operatörü yalnızca vector3 için tanımlıdır — vector4 üzerinde (veya bir
+--- vector4 içeren çıkarma işleminin sonucunda) ÇAĞRILIRSA "attempt to
+--- perform unsupported operation on a vector value" hatasıyla script çöker.
+--- origin (SafeForwardCoords'tan gelir) DAİMA vector4'tür (heading taşır);
+--- ama spawn çağrılarında zaten yalnızca .x/.y/.z okunur, heading hiç
+--- kullanılmaz — bu yüzden mesafe/depolama amaçlı TÜM vector'lar dispatch
+--- fonksiyonlarına girer girmez burada saf vector3'e indirgenir.
+local function _ToVec3(v)
+    if type(v) == 'vector4' then return vector3(v.x, v.y, v.z) end
+    return v
+end
+
 --- ★ [H11] Ortak ped/araç doğum yardımcısı. BeginPhysicalDispatch VE
 --- BeginRouteDispatch tarafından paylaşılır; hata yollarında yarım kalan
 --- entity'ler DÜNYADAN SİLİNİR (bkz. [H8]) — davranış tek-hedef sürümüyle
@@ -779,6 +792,12 @@ function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicle
     if type(origin) ~= 'vector3' and type(origin) ~= 'vector4' then return false, 'bad_origin' end
     if type(destination) ~= 'vector3' and type(destination) ~= 'vector4' then return false, 'bad_destination' end
 
+    -- ★ HATA DÜZELTMESİ: vector4 (heading taşıyan origin) ile vector3
+    -- arasındaki `#(a - b)` mesafe hesapları "unsupported operation on a
+    -- vector value" ile çöker. Buradan itibaren SAF vector3 kullanılır.
+    origin      = _ToVec3(origin)
+    destination = _ToVec3(destination)
+
     if not _SafeVec(origin) or not _SafeVec(destination) then
         return false, 'corrupt_vector'
     end
@@ -867,6 +886,16 @@ function Matrix.BeginRouteDispatch(botId, origin, waypointRefs, finalRef, plate,
     if type(origin) ~= 'vector3' and type(origin) ~= 'vector4' then return false, 'bad_origin' end
     if type(waypointRefs) ~= 'table' or #waypointRefs == 0 then return false, 'bad_waypoints' end
     if type(finalRef) ~= 'vector3' and type(finalRef) ~= 'vector4' then return false, 'bad_destination' end
+
+    -- ★ HATA DÜZELTMESİ: vector4 (heading taşıyan origin) ile vector3
+    -- arasındaki `#(a - b)` mesafe hesapları "unsupported operation on a
+    -- vector value" ile çöker (bkz. _ToVec3). Buradan itibaren rota
+    -- zincirindeki HER nokta SAF vector3'tür.
+    origin   = _ToVec3(origin)
+    finalRef = _ToVec3(finalRef)
+    for i = 1, #waypointRefs do
+        waypointRefs[i] = _ToVec3(waypointRefs[i])
+    end
 
     if not _SafeVec(origin) or not _SafeVec(finalRef) then return false, 'corrupt_vector' end
     for i = 1, #waypointRefs do
