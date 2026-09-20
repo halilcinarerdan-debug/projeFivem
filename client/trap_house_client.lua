@@ -163,10 +163,39 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya export basarisiz -- Trevor\'in treyleri dogru render OLMAYABILIR. Teshis icin "/traphouseipldebug" komutunu calistirin.')
     end
 
+    -- ★ TEŞHİS SONUCU (/traphouseipldebug): IsIplActive(trash)=true VE
+    -- GetInteriorAtCoords(EnterCoords) SIFIR DEĞİL (1794) -- yani bob74_ipl
+    -- IPL'i gerçekten aktif ediyor ve oyun motoru o noktada GERÇEK bir
+    -- interior tanıyor. Sorun koordinat/bob74_ipl kurulumu DEĞİL. Kalan en
+    -- olası açıklama: SetEntityCoords ANINDA bir ışınlama yapar ama interior
+    -- geometrisi/collision'ı akışa (streaming) o anda henüz binmemiş olabilir
+    -- -- özellikle oyuncu o interior'a yürüyerek YAKLAŞMADAN, doğrudan
+    -- ışınlandığında (normal oyunda yürürken motor bunu önceden aşamalı
+    -- olarak yükler, ama SetEntityCoords bu yükleme penceresini atlar). Bu,
+    -- FiveM'de özel interior ışınlamalarında STANDART bir sorun ve standart
+    -- çözümü: hedefte collision talep et + kısa bir ekran kararması ile
+    -- motora birkaç kare/saniye yükleme payı ver, sonra ışınla.
     local enter = data.enter_coords
     if enter then
-        SetEntityCoords(PlayerPedId(), enter.x, enter.y, enter.z, false, false, false, false)
-        SetEntityHeading(PlayerPedId(), enter.w or 0.0)
+        local ped = PlayerPedId()
+
+        RequestCollisionAtCoord(enter.x, enter.y, enter.z)
+        DoScreenFadeOut(300)
+        local fadeWaitStart = GetGameTimer()
+        while not IsScreenFadedOut() and (GetGameTimer() - fadeWaitStart) < 1000 do
+            Wait(0)
+        end
+
+        SetEntityCoords(ped, enter.x, enter.y, enter.z, false, false, false, false)
+        SetEntityHeading(ped, enter.w or 0.0)
+
+        local collisionWaitStart = GetGameTimer()
+        while not HasCollisionLoadedAroundEntity(ped) and (GetGameTimer() - collisionWaitStart) < 2500 do
+            RequestCollisionAtCoord(enter.x, enter.y, enter.z)
+            Wait(50)
+        end
+
+        DoScreenFadeIn(300)
     end
 
     -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC'ler
