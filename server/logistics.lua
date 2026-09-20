@@ -116,10 +116,14 @@ local WARNED_MISSING_TRUST  = false
 --   d = sqrt((x1-x2)² + (y1-y2)² + (z1-z2)²)
 -- FiveM'in native `#(a - b)` operatörü aynı hesabı yapar; guard'lar
 -- yalnızca bozuk girdiler için (#nil hatası önleyici).
+-- ★ DÜZELTME: FiveM'de vector3/vector4'ün type() sonucu 'vector3'/'vector4'
+-- string'idir, 'table'/'userdata' DEĞİL. Bu kontrol eskiden gerçek HER
+-- vector3'ü reddediyordu (mesafe hep math_huge dönüyordu) — FindNearestTrapHouse,
+-- FindDeadZone, FindActiveDeadDropAt SESSİZCE hep "bulunamadı" veriyordu.
 local function VectorDistance(a, b)
     if not a or not b then return math_huge end
-    if type(a) ~= 'userdata' and type(a) ~= 'table' then return math_huge end
-    if type(b) ~= 'userdata' and type(b) ~= 'table' then return math_huge end
+    if type(a) ~= 'userdata' and type(a) ~= 'table' and type(a) ~= 'vector3' and type(a) ~= 'vector4' then return math_huge end
+    if type(b) ~= 'userdata' and type(b) ~= 'table' and type(b) ~= 'vector3' and type(b) ~= 'vector4' then return math_huge end
     return #(a - b)
 end
 
@@ -132,8 +136,11 @@ local function LerpCoords(a, b, t)
     )
 end
 
+-- ★ AYNI DÜZELTME (bkz. VectorDistance yorumu): vector3/vector4 artık kabul
+-- ediliyor. Bu satır düzelmeden ÖNCE DispatchDealer'ın origin/vehicle
+-- kontrolleri GERÇEK vector3 değerlerini bile hep geçersiz sayıyordu.
 local function IsValidCoords(c)
-    if type(c) ~= 'table' and type(c) ~= 'userdata' then return false end
+    if type(c) ~= 'table' and type(c) ~= 'userdata' and type(c) ~= 'vector3' and type(c) ~= 'vector4' then return false end
     return c.x ~= nil and c.y ~= nil and c.z ~= nil
 end
 
@@ -149,7 +156,8 @@ end
 -- ile ÇARPIMSAL bozulmuş halidir. KARMAŞIKLIK: O(1).
 local function ValidateDestination(origin, destination)
     if destination == nil then return false, 'missing_vector' end
-    if type(destination) ~= 'table' and type(destination) ~= 'userdata' then
+    if type(destination) ~= 'table' and type(destination) ~= 'userdata'
+        and type(destination) ~= 'vector3' and type(destination) ~= 'vector4' then
         return false, 'corrupt_vector'
     end
 

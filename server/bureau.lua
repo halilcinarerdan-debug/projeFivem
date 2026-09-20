@@ -78,10 +78,17 @@ local WARNED_MISSING_SUPPLIER_HOOK = false
 -- =====================================================================
 -- UTILITIES
 -- =====================================================================
+-- ★ DÜZELTME: FiveM'de vector3/vector4 değerlerinin type() sonucu
+-- 'vector3'/'vector4' string'idir — 'table' DEĞİL, 'userdata' DEĞİL. Bu
+-- kontrol eskiden yalnızca 'table'/'userdata' kabul ediyordu, yani GERÇEK
+-- her vector3 GEÇERSİZ sayılıyor, mesafe her zaman math_huge dönüyordu
+-- (FindNearestTrapHouse asla bir trap house bulamıyordu — üçgenleme/
+-- deşifre kazancı SESSİZCE hiç işlemiyordu). Artık vector3/vector4 de
+-- kabul ediliyor.
 local function VectorDistance(a, b)
     if not a or not b then return math_huge end
-    if type(a) ~= 'userdata' and type(a) ~= 'table' then return math_huge end
-    if type(b) ~= 'userdata' and type(b) ~= 'table' then return math_huge end
+    if type(a) ~= 'userdata' and type(a) ~= 'table' and type(a) ~= 'vector3' and type(a) ~= 'vector4' then return math_huge end
+    if type(b) ~= 'userdata' and type(b) ~= 'table' and type(b) ~= 'vector3' and type(b) ~= 'vector4' then return math_huge end
     local ax, ay, az = a.x, a.y, a.z
     local bx, by, bz = b.x, b.y, b.z
     if type(ax) ~= 'number' or type(ay) ~= 'number' or type(az) ~= 'number' then return math_huge end
@@ -91,8 +98,12 @@ local function VectorDistance(a, b)
     return #(a - b)
 end
 
+-- ★ AYNI DÜZELTME (bkz. VectorDistance yorumu): vector3/vector4 artık kabul
+-- ediliyor. Bu satır düzelmeden ÖNCE /traphouseekle'a GEÇERLİ bir koordinat
+-- bile versen "gecersiz koordinat" hatası ALIRDI — çünkü CreateTrapHouse
+-- her zaman IsValidCoords(vector3(x,y,z))'yi false buluyordu.
 local function IsValidCoords(c)
-    if type(c) ~= 'table' and type(c) ~= 'userdata' then return false end
+    if type(c) ~= 'table' and type(c) ~= 'userdata' and type(c) ~= 'vector3' and type(c) ~= 'vector4' then return false end
     if c.x == nil or c.y == nil or c.z == nil then return false end
     if type(c.x) ~= 'number' or type(c.y) ~= 'number' or type(c.z) ~= 'number' then return false end
     if c.x ~= c.x or c.y ~= c.y or c.z ~= c.z then return false end
