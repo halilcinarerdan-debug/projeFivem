@@ -32,12 +32,12 @@
 --        yapısal olarak engeller. BeginPhysicalDispatch/BeginRouteDispatch
 --        başında kontrol edilir, CompleteDispatch/DespawnDispatchEntity'de
 --        serbest bırakılır.
---   [H13] TAKTİK HUD VERİ KÖPRÜSÜ: Matrix.Hud.PushSnapshots yalnızca HUD'ı
---        AÇIK olan oyunculara (Matrix.HudViewers) veri gönderir; gönderilen
---        veri HAM float'tır ({ metric=..., value=... }) — edebi/askeri
---        bültene çevirme işi TAMAMEN client/hud.lua'da yapılır ("Sıfır Sayı
---        Standardı"). Sunucu konsolu (print/Matrix.Log) ve /matrixdump bu
---        köprüden ETKİLENMEZ, ham float dökmeye devam eder.
+--   [H13→E5] (KALDIRILDI) Bu dosyada bir F6-HUD köprüsü (Matrix.Hud.
+--        PushSnapshots/HudViewers) vardı; server/market.lua bize
+--        paylaşılınca ORADA ZATEN aynı köprünün (farklı, daha zengin bir
+--        panel tasarımıyla) OTORİTER sürümünün var olduğu ortaya çıktı —
+--        iki `function Matrix.Hud.PushSnapshots()` tanımı SESSİZCE
+--        birbirini eziyordu. Bu dosyadaki kopya kaldırıldı; bkz. [E5].
 --   [H14] SUNUCU TARAFI PED SPAWN ANTI-CRASH GUARD: 'SetEntityAsMissionEntity'
 --        SUNUCU LUA ORTAMINDA TANIMLI DEĞİLDİR (client-only native) — çağrılırsa
 --        'attempt to call a nil value' hatasıyla script'i ve canlanma döngüsünü
@@ -102,8 +102,6 @@ Matrix.Inventory   = Matrix.Inventory   or {}
 Matrix.PlayerSourceIndex = Matrix.PlayerSourceIndex or {}
 Matrix.NextBotId = Matrix.NextBotId or 1
 Matrix.Dispatches = Matrix.Dispatches or {}
--- citizenid -> rank key ('Leader'|'Logistics_Officer'|'Chemist'), bkz. [E4]/[/rutbeata].
-Matrix.PlayerRanks = Matrix.PlayerRanks or {}
 
 Matrix.QBX = exports.qbx_core
 
@@ -1279,81 +1277,37 @@ function Matrix.TickPhysicalDispatches()
 end
 
 -- =====================================================================
--- KATMAN 5 [H13]: TAKTİK HUD VERİ KÖPRÜSÜ (server ↔ client/hud.lua)
---
--- ★ SIFIR SAYI STANDARDI: Buradan çıkan satırlar HAM float taşır
--- ({ metric=..., value=... }). Edebi/askeri bültene çevirme işi TAMAMEN
--- client/hud.lua'da yapılır. Bu köprü yalnızca HUD'ı AÇIK olan
--- oyunculara (Matrix.HudViewers) veri gönderir — HUD kapalıyken sıfıra
--- yakın maliyet (0 Resmon bütçesi).
---
--- Geliştirici Kokpiti İstisnası: bu köprü sunucu konsoluna (print/
--- Matrix.Log) veya /matrixdump'a HİÇ dokunmaz — onlar zaten ham float
--- basmaya devam eder (bkz. RegisterCommand('matrixdump', ...) aşağıda).
+-- ★ [E5] DÜZELTME: server/market.lua ZATEN kendi Matrix.Hud köprüsünü
+-- (Matrix.Hud.BuildSnapshot/PushSnapshots, HudViewers, 'matrix:server:
+-- hudToggled') ve kendi hiyerarşi sistemini (Matrix.Hierarchy.GetRank/
+-- SetRank/HasCommandAuthority, matrix_hierarchy DB tablosu) barındırıyor
+-- — market.lua bu proje ile paylaşılana kadar bundan haberimiz yoktu.
+-- Buradaki eski [H13] F6-HUD köprüsü DUPLICATE idi: `function Matrix.Hud.
+-- PushSnapshots()` iki dosyada da tanımlıydı ve hangisinin son yüklenip
+-- diğerini SESSİZCE EZDİĞİ fxmanifest server_scripts sırasına bağlıydı —
+-- KALDIRILDI. market.lua'nın sürümü tek/otoriter kaynak olarak kalıyor;
+-- master ticker'daki `Matrix.Hud.PushSnapshots()` çağrısı (aşağıda,
+-- değişmedi) artık kesin olarak ona gidiyor. Aynı sebeple main.lua'daki
+-- ayrı /rutbeata komutu ve Matrix.PlayerRanks tablosu da KALDIRILDI
+-- (market.lua'nın DB'ye yazan, retry'li /rutbeata + Matrix.Hierarchy
+-- sistemiyle çakışıyordu) — bkz. KOMUTLAR bölümündeki not.
 -- =====================================================================
-Matrix.Hud = Matrix.Hud or {}
-Matrix.HudViewers = Matrix.HudViewers or {}
-
-RegisterNetEvent('matrix:server:hudToggled', function(active)
-    local src = source
-    if active then
-        Matrix.HudViewers[src] = true
-    else
-        Matrix.HudViewers[src] = nil
-    end
-end)
-
-AddEventHandler('playerDropped', function()
-    Matrix.HudViewers[source] = nil
-end)
-
-local HUD_MAX_BOT_LINES = 12  -- 0-resmon bütçesi: sınırsız bot dökümü yasak
-
-function Matrix.Hud.BuildSnapshotLines(src)
-    local lines = {}
-
-    local citizenid   = Matrix.PlayerSourceIndex[src]
-    local playerState = citizenid and Matrix.PlayerState[citizenid]
-    if playerState and playerState.biology then
-        lines[#lines + 1] = { header = true, text = '=== OPERATIF BIYO-TELEMETRI ===' }
-        lines[#lines + 1] = { metric = 'cortisol_level', value = playerState.biology.cortisol_level }
-        lines[#lines + 1] = { metric = 'fatigue_level',  value = playerState.biology.fatigue_level }
-    end
-
-    lines[#lines + 1] = { header = true, text = '=== SAHA EKIBI DURUMU ===' }
-    local shown = 0
-    for id, bot in pairs(Matrix.Bots) do
-        if shown >= HUD_MAX_BOT_LINES then break end
-        if bot.status == 'active' then
-            lines[#lines + 1] = { header = true, text = ('-- Bot #%d [%s] --'):format(id, bot.name) }
-            lines[#lines + 1] = { metric = 'cortisol_level', value = bot.biology.cortisol_level,      label = '  ' }
-            lines[#lines + 1] = { metric = 'fatigue_level',  value = bot.biology.fatigue_level,       label = '  ' }
-            lines[#lines + 1] = { metric = 'durability',     value = bot.state.weapon_wear_level or 1.0, label = '  ' }
-            shown = shown + 1
-        end
-    end
-
-    return lines
-end
-
-function Matrix.Hud.PushSnapshots()
-    for src in pairs(Matrix.HudViewers) do
-        local ok, lines = pcall(Matrix.Hud.BuildSnapshotLines, src)
-        if ok then
-            TriggerClientEvent('matrix:client:hudSnapshot', src, lines)
-        else
-            Matrix.Log('CORE', '[HATA] Hud.BuildSnapshotLines (src=%s) basarisiz: %s', tostring(src), tostring(lines))
-        end
-    end
-end
 
 -- =====================================================================
 -- ★ [E4] KATMAN 5 EK EMİR: CANLI KADRO & HİYERARŞİ RAPORU
 -- F10 menüsünün en tepesindeki "Canlı Kadro & Hiyerarşi Raporu" alt
--- menüsü açıldığı AN bu callback'i çağırır (client: lib.callback.await).
--- Sürekli bir polling/thread YOKTUR — yalnızca istek anında hesaplanan
--- SAF bir istek/cevap (callback) yapısı; 0 Resmon bütçesi HUD'dan
--- bağımsız olarak korunur.
+-- menüsü açıldığı AN bu callback'i çağırır (client: lib.callback.await,
+-- bkz. client/hud.lua OpenCanliKadroRaporu). HER tıklamada TAZE bir
+-- istek atar — client tarafında statik/cache YOKTUR. Sürekli bir
+-- polling/thread da YOKTUR — yalnızca istek anında hesaplanan SAF bir
+-- istek/cevap (callback) yapısı; 0 Resmon bütçesi korunur.
+--
+-- ★ [E5] HATA DÜZELTMESİ: rütbe/yetki artık market.lua'nın OTORİTER
+-- kaynağı olan Matrix.Hierarchy.GetRank(citizenid)'den okunur. Önceki
+-- sürüm hiçbir yerde YAZILMAYAN kendi Matrix.PlayerRanks tablosunu
+-- okuyordu (bu yüzden /rutbeata sonrası rapor hep 'Rutbesiz' kalıyordu) —
+-- sorun hiçbir zaman istemcinin eski veri okuması değildi (o zaten her
+-- açılışta taze istiyordu), sunucunun YANLIŞ tabloyu okumasıydı.
 -- =====================================================================
 local ROSTER_REPORT_MAX_LINES = 100 -- RAM-bomb / menü-taşması savunması
 
@@ -1380,7 +1334,7 @@ lib.callback.register('matrix:callback:getRosterReport', function(src)
             if #lines >= ROSTER_REPORT_MAX_LINES then break end
             if player and player.PlayerData then
                 local citizenid = player.PlayerData.citizenid
-                local rank      = citizenid and Matrix.PlayerRanks[citizenid]
+                local rank      = citizenid and Matrix.Hierarchy.GetRank(citizenid)
                 local rankDef   = rank and Config.Hierarchy.Ranks[rank]
                 local rankLabel = rankDef and rankDef.label or 'Rutbesiz'
                 local yetki     = (rank and ROSTER_AUTHORITY_LABELS[rank]) or 'KISITLI'
@@ -1677,32 +1631,13 @@ RegisterCommand('rotaciz', function(src, args)
     end
 end, false)
 
--- =====================================================================
--- ★ [E4] /rutbeata — HİYERARŞİ RÜTBE ATAMASI
--- F10 menüsündeki OpenRutbeAtaDialog zaten bu komutu ExecuteCommand ile
--- tetikliyordu; sunucu tarafı karşılığı burada. Atanan rütbe
--- Matrix.PlayerRanks[citizenid]'e yazılır — "Canlı Kadro & Hiyerarşi
--- Raporu" (matrix:callback:getRosterReport) buradan okur.
--- =====================================================================
-RegisterCommand('rutbeata', function(src, args)
-    local targetSrc = tonumber(args[1])
-    local rank      = args[2]
-    if not targetSrc or not Config.Hierarchy.Ranks[rank] then
-        Reply(src, 'Kullanim: /rutbeata [hedefServerId] [Leader|Logistics_Officer|Chemist]')
-        return
-    end
-
-    local targetState = Matrix.GetOrCreatePlayerState(targetSrc)
-    if not targetState then
-        Reply(src, 'Hedef oyuncu profili cozulemedi.')
-        return
-    end
-
-    Matrix.PlayerRanks[targetState.citizenid] = rank
-    local rankLabel = Config.Hierarchy.Ranks[rank].label
-    Reply(src, ('Hedef #%d rutbesi %s (%s) olarak atandi.'):format(targetSrc, rank, rankLabel))
-    Reply(targetSrc, ('Yeni rutbeniz: %s (%s)'):format(rank, rankLabel))
-end, false)
+-- ★ [E5] /rutbeata (KALDIRILDI): server/market.lua ZATEN bunu tanımlıyor
+-- (Matrix.Hierarchy.SetRank ile matrix_hierarchy tablosuna yazan, 3
+-- denemeli citizenid çözümlemesi olan, DB-kalıcı bir sürüm). Buradaki
+-- kopya RegisterCommand aynı komut adını İKİNCİ KEZ kaydediyordu ve kendi
+-- (yazılmayan/okunmayan) Matrix.PlayerRanks tablosuna yazıyordu — gerçek
+-- rütbe sistemiyle tamamen kopuktu. Kaldırıldı; "Canlı Kadro & Hiyerarşi
+-- Raporu" artık market.lua'nın Matrix.Hierarchy.GetRank'ini okuyor.
 
 RegisterCommand('balistiktest', function(src, args)
     local weaponSerial = tostring(args[1] or 'TEST-SERIAL-0001')
