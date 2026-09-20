@@ -48,8 +48,22 @@ local function DrawWorldPrompt(coords, text)
     DrawText(sx, sy)
 end
 
+-- ★ main.lua'nın _ToVec3 güvenlik önleminin BİREBİR AYNISI: GTA V'de
+-- vector3 ile vector4 arasında çıkarma/uzunluk (#) operatörü desteklenmez
+-- ("attempt to perform unsupported operation on a vector value"). shellData
+-- .enter_coords/.exit_coords heading taşıdığı için vector4 (bkz. shared/
+-- config.lua Config.TrapHouseInterior.Shell), ama GetEntityCoords() daima
+-- vector3 döner — VDist'e her iki tip de gelebileceğinden burada coerce
+-- edilir.
+local function _ToVec3(v)
+    if type(v) == 'vector4' then
+        return vector3(v.x, v.y, v.z)
+    end
+    return v
+end
+
 local function VDist(a, b)
-    return #(a - b)
+    return #(_ToVec3(a) - _ToVec3(b))
 end
 
 local function RequestModelSync(model)
@@ -127,16 +141,15 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
     insideTrapHouse = data.trap_house_id
     shellData        = data
 
-    local enter = data.enter_coords
-    if enter then
-        SetEntityCoords(PlayerPedId(), enter.x, enter.y, enter.z, false, false, false, false)
-        SetEntityHeading(PlayerPedId(), enter.w or 0.0)
-    end
-
-    -- ★ 'bob74_ipl' (https://github.com/Bob74/bob74_ipl) — Trevor'ın
-    -- treyleri FiveM'in bilinen "kırık/delikli interior" listesinde
-    -- olduğundan düz bir RequestIpl ile doğru render OLMUYOR; bu kaynağın
-    -- resmi client-side GetTrevorsTrailerObject() API'si kullanılır.
+    -- ★ SIRA KRİTİK: 'bob74_ipl' (https://github.com/Bob74/bob74_ipl) interior
+    -- proxy'sini PIN'lemesi, oyuncuyu ORAYA IŞINLAMADAN ÖNCE bitmiş olmalı.
+    -- Trevor'ın treyleri FiveM'in bilinen "kırık/delikli interior" listesinde
+    -- olduğundan, oyun motoru bu interior'ı yalnızca bob74_ipl onu ZORLA
+    -- pin'lediğinde render eder — önce ışınlayıp SONRA pin'lersek oyuncu o an
+    -- interior henüz yüklenmemişken açık/boş hali görür (bildirilen "blip
+    -- üzerine ışınlandım ama içeri değil" belirtisi tam olarak budur). Bu
+    -- yüzden Interior.Set çağrısından sonra kısa bir Wait ile oyun motoruna
+    -- proxy'yi pin'lemesi için bir kaç frame payı verilir.
     -- Sunucuda bu kaynak KURULU + BAŞLATILMIŞ (server.cfg -> "start
     -- bob74_ipl") DEĞİLSE export bulunamaz — bu durumda oyuncuya hiçbir
     -- şey KIRILMAZ (pcall korumalı), yalnızca client konsoluna açık bir
@@ -146,9 +159,16 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         local ok, trailerObj = pcall(function() return exports['bob74_ipl']:GetTrevorsTrailerObject() end)
         if ok and type(trailerObj) == 'table' and trailerObj.Interior and trailerObj.Interior.Set then
             pcall(trailerObj.Interior.Set, trailerObj.Interior.trash)
+            Wait(300)
         else
             print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya baslatilmamis -- Trevor\'in treyleri dogru render OLMAYACAK. Sunucuya bob74_ipl kurup server.cfg icine "start bob74_ipl" ekleyin: https://github.com/Bob74/bob74_ipl')
         end
+    end
+
+    local enter = data.enter_coords
+    if enter then
+        SetEntityCoords(PlayerPedId(), enter.x, enter.y, enter.z, false, false, false, false)
+        SetEntityHeading(PlayerPedId(), enter.w or 0.0)
     end
 
     -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC'ler
