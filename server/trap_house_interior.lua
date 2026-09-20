@@ -93,6 +93,23 @@ function Matrix.TrapHouseInterior.GetPlayerTrapHouse(src)
     return PlayerInteriorState[src]
 end
 
+--- ★ DÜZELTME: eskiden burası rastgele model/kıyafetli KOZMETİK "ambient"
+--- NPC'ler (gerçek oyun durumuyla hiç bağlantısı olmayan yabancılar)
+--- üretiyordu. Artık YALNIZCA bu trap house'a GERÇEKTEN atanmış
+--- (bot.state.trap_house_id eşleşen, status='active') Matrix.Bots
+--- kayıtları döner — atanmış bot yoksa liste boş döner ve içeride HİÇ
+--- kimse görünmez ("sadece bizim ajanlarımız olsun" talebi).
+local function GetResidentBots(trapHouseId)
+    local list = {}
+    for id, bot in pairs(Matrix.Bots or {}) do
+        if bot.status == 'active' and bot.state and bot.state.trap_house_id == trapHouseId then
+            list[#list + 1] = { id = id, name = bot.name, role = bot.role }
+            if #list >= 20 then break end
+        end
+    end
+    return list
+end
+
 local function HasMembership(citizenid)
     if not citizenid then return false end
     if Matrix.Hierarchy and Matrix.Hierarchy.GetRank then
@@ -166,11 +183,8 @@ RegisterNetEvent('matrix:server:trapHouseInterior:enter', function(trapHouseId)
         packaging_pos = shell.PackagingPos,
         exit_coords   = shell.ExitCoords,
         required_ipl  = shell.RequiredIpl,
-        ambient       = {
-            count     = Config.TrapHouseInterior.AmbientPedCount,
-            models    = Config.TrapHouseInterior.AmbientPedModels,
-            scenarios = Config.TrapHouseInterior.AmbientScenarios
-        }
+        resident_bots = GetResidentBots(trapHouseId),
+        ambient_scenarios = Config.TrapHouseInterior.AmbientScenarios
     })
 
     Matrix.Log('TRAPHOUSE', 'src=%d trap house #%d içine girdi (bucket:%d).', src, trapHouseId, bucket)

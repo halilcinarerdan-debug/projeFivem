@@ -530,9 +530,16 @@ Config.TrapHouseInterior = {
     -- bu yüzden çok daha toleranslı bir sınır kullanılır.
     EntryZTolerance   = 8.0,
 
-    -- Vanilla döküntü iç mekan kabuğu (Trevor'ın treyleri) — tüm trap
-    -- house'lar AYNI fiziksel koordinatları paylaşır; routing bucket
-    -- birbirlerini görmelerini/etkilemelerini engeller.
+    -- ★★★ BİLİNEN SORUN — HENÜZ ÇÖZÜLMEDİ ★★★
+    -- Buradaki koordinat DOĞRULANMAMIŞ bir tahmindi ve oyuncuyu Sandy
+    -- Shores'ta AÇIK HAVAYA (Trevor'ın treylerinin GERÇEK konumuna değil)
+    -- ışınladığı doğrulandı. Ayrıca Trevor'ın treyleri, FiveM'in bilinen
+    -- "kırık/delikli interior" listesindeki lokasyonlardan biri — düz bir
+    -- RequestIpl çağrısıyla doğru render OLMUYOR (bkz. bob74_ipl projesinin
+    -- bu konumu özel olarak ele alması). Kalıcı çözüm kullanıcıyla
+    -- konuşulan üç seçenekten birine bağlı (bob74_ipl bağımlılığı / kendi
+    -- prop'larımızdan inşa edilen oda / gerçek bir MLO kaynağı) — o karar
+    -- verilene kadar bu Shell BİLEREK yanlış/placeholder durumda bırakıldı.
     Shell = {
         RequiredIpl  = 'trailertrash_i2',
         EnterCoords  = vector4(2001.6, 3820.9, 32.3, 90.0),
@@ -541,12 +548,13 @@ Config.TrapHouseInterior = {
         ExitCoords   = vector4(2001.6, 3820.9, 32.3, 270.0)
     },
 
-    -- Ambient dekor (yalnızca kozmetik, client-side local ped — netsync
-    -- YOK, 0 sunucu maliyeti): "20 adam" atmosferi.
-    AmbientPedCount = 8,
-    AmbientPedModels = {
-        'g_m_y_lost_01', 'g_m_y_lost_02', 'g_m_m_chemwork_01', 'a_m_y_hasjew_01'
-    },
+    -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC
+    -- listesi (AmbientPedCount/AmbientPedModels) vardı. Kaldırıldı — içeride
+    -- artık YALNIZCA server/trap_house_interior.lua'nın GetResidentBots'unun
+    -- döndürdüğü, o trap house'a GERÇEKTEN atanmış Matrix.Bots kayıtları
+    -- görünür (bkz. client/trap_house_client.lua RESIDENT_BOT_PED_MODEL).
+    -- AmbientScenarios sadece bu GERÇEK botların oynadığı animasyon
+    -- havuzu olarak kalıyor (kimlik değil, salt duruş/aksiyon çeşitliliği).
     AmbientScenarios = {
         'WORLD_HUMAN_SMOKING', 'WORLD_HUMAN_STAND_IMPATIENT', 'WORLD_HUMAN_LEANING'
     }

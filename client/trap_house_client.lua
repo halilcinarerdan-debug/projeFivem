@@ -3,10 +3,11 @@
 --
 -- client/hud.lua'nın kapsamı HUD + F10 menüsü olarak kalır; bu dosya
 -- KATMAN 6'nın FİZİKSEL DÜNYA öğelerini taşır: kapı blip'i/giriş-çıkış
--- tetikleyicisi, iç mekan ambient dekor (kozmetik, netsync YOK), tezgah/
--- paketleme odası E-tetikleri, Rendezvous satıcı/pusu ped'leri. Saf metin
--- tabanlı monokrom felsefe korunur — HTML/CSS/NUI YOK, yalnızca native
--- DrawText/blip/ped.
+-- tetikleyicisi, içeride GERÇEKTEN atanmış Matrix.Bots'ların fiziksel
+-- temsili (kozmetik/rastgele NPC DEĞİL — netsync de yok, salt görsel),
+-- tezgah/paketleme odası E-tetikleri, Rendezvous satıcı/pusu ped'leri.
+-- Saf metin tabanlı monokrom felsefe korunur — HTML/CSS/NUI YOK, yalnızca
+-- native DrawText/blip/ped.
 -- =====================================================================
 
 local TRAP_HOUSE_REFRESH_MS = 30000
@@ -15,7 +16,15 @@ local INTERACT_RADIUS       = 2.0
 local trapHouses      = {} -- id -> { id, coords, label, blip }
 local insideTrapHouse = nil -- şu an içinde bulunulan trap house id (yoksa nil)
 local shellData        = nil -- teleportIn payload'ından gelen iç mekan verisi
-local ambientPeds       = {}
+local residentPeds     = {} -- o an içeride görünen GERÇEK bot temsilleri (kozmetik degil)
+
+-- ★ server/main.lua'nın DEALER_PED_MODEL_HASH'iyle (DEALER_PED_MODEL_NAME =
+-- 'g_m_y_famdnf_01') KASITLI OLARAK AYNI model. Bir bot burada göründüğünde
+-- oyuncunun sahada gördüğü GERÇEK dealer skin'inden farklı görünmemeli —
+-- main.lua'daki [H14] Anti-Crash Guard sabit modeli değiştirilirse buradaki
+-- de elle güncellenmelidir (iki dosya arasında paylaşılan bir Config alanı
+-- YOKTUR çünkü main.lua bu sabiti dışa hiç açmıyor).
+local RESIDENT_BOT_PED_MODEL = 'g_m_y_famdnf_01'
 
 local sellerPeds  = {} -- handoffId -> { entity, coords, radius }
 local ambushPeds  = {}
@@ -128,32 +137,37 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         pcall(RequestIpl, data.required_ipl)
     end
 
-    -- ★ Ambient dekor: KOZMETİK, netsync YOK (yalnızca bu istemcide görünür).
-    -- "20 adam sigara icip paketliyor" atmosferi — hicbir oynanis mantigina
-    -- bagli DEGILDIR, resource stop/teleportOut'ta temizlenir.
-    if data.ambient and data.ambient.count and data.ambient.count > 0 and shellData.workbench_pos then
+    -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC'ler
+    -- (gerçek oyun durumuyla bağlantısı olmayan yabancılar) spawn ediliyordu.
+    -- Artık YALNIZCA server'ın gönderdiği `resident_bots` listesindeki
+    -- GERÇEK Matrix.Bots kayıtları (bu trap house'a bot.state.trap_house_id
+    -- ile atanmış, status='active' olanlar) fiziksel olarak temsil edilir —
+    -- "sadece bizim ajanlarımız olsun" talebi. Liste boşsa (atanmış bot
+    -- yoksa) içeride HİÇ KİMSE görünmez. Netsync YOK — bu, ilgili bot'un
+    -- GERÇEK sunucu-taraflı ped'i DEĞİL, sırf bu oyuncunun gördüğü yerel
+    -- bir görsel temsildir (bkz. dosya başı notu: botlar zaten STABİL/
+    -- BEKLEMEDE durumundayken dünyada hiç spawn edilmiş bir ped'e sahip
+    -- değildir, bkz. main.lua CompleteDispatch).
+    if type(data.resident_bots) == 'table' and #data.resident_bots > 0 and shellData.workbench_pos then
         CreateThread(function()
-            local models    = data.ambient.models or {}
-            local scenarios = data.ambient.scenarios or {}
-            if #models == 0 or #scenarios == 0 then return end
+            local scenarios = data.ambient_scenarios or { 'WORLD_HUMAN_SMOKING', 'WORLD_HUMAN_STAND_IMPATIENT', 'WORLD_HUMAN_LEANING' }
+            local model = RequestModelSync(RESIDENT_BOT_PED_MODEL)
+            if not model then return end
 
-            for i = 1, data.ambient.count do
-                local model = RequestModelSync(models[((i - 1) % #models) + 1])
-                if model then
-                    local offsetX = ((i % 5) - 2) * 1.4
-                    local offsetY = math.floor(i / 5) * 1.4
-                    local base = data.workbench_pos
-                    local px, py, pz = base.x + offsetX, base.y + offsetY, base.z
-                    local ped = CreatePed(4, model, px, py, pz, 0.0, false, false)
-                    if ped and ped ~= 0 then
-                        SetEntityAsMissionEntity(ped, true, true)
-                        SetBlockingOfNonTemporaryEvents(ped, true)
-                        TaskStartScenarioInPlace(ped, scenarios[((i - 1) % #scenarios) + 1], 0, true)
-                        ambientPeds[#ambientPeds + 1] = ped
-                    end
-                    SetModelAsNoLongerNeeded(model)
+            for i, botInfo in ipairs(data.resident_bots) do
+                local offsetX = ((i % 5) - 2) * 1.4
+                local offsetY = math.floor(i / 5) * 1.4
+                local base = data.workbench_pos
+                local px, py, pz = base.x + offsetX, base.y + offsetY, base.z
+                local ped = CreatePed(4, model, px, py, pz, 0.0, false, false)
+                if ped and ped ~= 0 then
+                    SetEntityAsMissionEntity(ped, true, true)
+                    SetBlockingOfNonTemporaryEvents(ped, true)
+                    TaskStartScenarioInPlace(ped, scenarios[((i - 1) % #scenarios) + 1], 0, true)
+                    residentPeds[#residentPeds + 1] = ped
                 end
             end
+            SetModelAsNoLongerNeeded(model)
         end)
     end
 
@@ -162,17 +176,17 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
     end
 end)
 
-local function CleanupAmbientPeds()
-    for _, ped in ipairs(ambientPeds) do
+local function CleanupResidentPeds()
+    for _, ped in ipairs(residentPeds) do
         if DoesEntityExist(ped) then
             pcall(DeleteEntity, ped)
         end
     end
-    ambientPeds = {}
+    residentPeds = {}
 end
 
 RegisterNetEvent('matrix:client:trapHouseInterior:teleportOut', function(data)
-    CleanupAmbientPeds()
+    CleanupResidentPeds()
     insideTrapHouse = nil
     shellData        = nil
 
@@ -184,7 +198,7 @@ end)
 
 AddEventHandler('onClientResourceStop', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
-    CleanupAmbientPeds()
+    CleanupResidentPeds()
 end)
 
 -- =====================================================================
