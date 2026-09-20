@@ -530,33 +530,35 @@ Config.TrapHouseInterior = {
     -- bu yüzden çok daha toleranslı bir sınır kullanılır.
     EntryZTolerance   = 8.0,
 
-    -- ★ DÜZELTİLDİ: eski koordinat (2001.6, 3820.9) doğrulanmamış bir
-    -- tahmindi ve oyuncuyu Sandy Shores'ta açık havaya ışınlıyordu. Trevor'ın
-    -- treyleri FiveM'in bilinen "kırık/delikli interior" listesinde olduğu
-    -- için düz bir RequestIpl ile de doğru render OLMAZ — bu yüzden
-    -- 'bob74_ipl' kaynağı (https://github.com/Bob74/bob74_ipl) bağımlılık
-    -- olarak eklendi ve client/trap_house_client.lua kendi
-    -- GetTrevorsTrailerObject().Interior.Set(...) çağrısını yapar (bob74_ipl
-    -- kaynak kodu — lib/common.lua — okunarak doğrulandı: bu çağrı yalnızca
-    -- düz natif RequestIpl'e sarılıdır ve IsIplActive ile korunur, yani
-    -- idempotenttir; ayrıca bob74_ipl'in kendi resource start'ında zaten
-    -- otomatik yaptığı TrevorsTrailer.LoadDefault() ile AYNI işi tekrarlar —
-    -- resource restart sırası gibi bir sebeple o ilk çağrı atlanmış olsa
-    -- bile burada güvenli bir yedek olarak yeniden talep edilmiş olur).
-    -- İnteriorun yine de render OLMAMASI durumunda client/
+    -- ★ KÖKLÜ DEĞİŞİKLİK (canlı testte doğrulandı): önce Trevor'ın treyleri
+    -- (bob74_ipl, interiorId 2562) denendi — koordinat/IPL/export hepsi
+    -- doğruydu (IsIplActive=true, GetInteriorAtCoords sıfır değil) ama
+    -- `PinInteriorInMemory` + 15 saniye beklemeye rağmen `IsInteriorReady`
+    -- HİÇBİR ZAMAN true olmadı: bu sunucu ortamında bu spesifik (tek
+    -- oyunculu hikaye içeriği) interior güvenilir şekilde stream edilemiyor.
+    -- Kullanıcı kararıyla TAMAMEN TERK EDİLDİ. Yerine bob74_ipl'in GTA Online
+    -- "düşük gelirli ev" interior'ı kullanılıyor (GTAOHouseLow1, interiorId
+    -- 149761 — bkz. client/trap_house_client.lua GetGTAOHouseLow1Object()).
+    -- DLC/çok-oyunculu interior'lar milyonlarca GTA Online oyuncusu
+    -- tarafından günlük kullanıldığından çok daha güvenilir stream ediliyor;
+    -- ayrıca `Smoke.Set(stage2)` ile bedavaya "hafif kirli/dumanlı" atmosfer
+    -- sağlıyor. Koordinat (bob74_ipl'in kendi client.lua'sındaki yorumdan
+    -- doğrulandı): X:261.4586 Y:-998.8196 Z:-99.00863 — bu, apartman
+    -- interior'larının paylaştığı ayrı/yeraltı "interior cebi" konumudur
+    -- (normal harita ile çakışmaz). Heading/iç mekan yerleşimi (Workbench/
+    -- Packaging/Exit) TAHMİNİDİR — küçük bir stüdyo dairesi olduğundan
+    -- kapıya yakın, birbirinden 1-2m ayrık noktalar seçildi; oyunda içeri
+    -- girip gözlemledikten sonra bu üç nokta ve EnterCoords.w (heading)
+    -- rahatça ince ayarlanabilir (yalnızca sayı değişikliği, kod değişikliği
+    -- gerekmez). İnteriorun yine de render OLMAMASI durumunda client/
     -- trap_house_client.lua'daki "/traphouseipldebug" teşhis komutu
-    -- IsIplActive/GetInteriorAtCoords sonuçlarını F8 konsoluna basar.
-    -- Koordinat (bob74_ipl'in kendi client.lua'sındaki yorumdan doğrulandı):
-    -- X:1985.48132 Y:3828.76757 Z:32.5. Heading/iç mekan yerleşimi (Workbench/
-    -- Packaging/Exit) TAHMİNİDİR — küçük bir treyler içi olduğundan kapıya
-    -- yakın, birbirinden 1-2m ayrık noktalar seçildi; oyunda içeri girip
-    -- gözlemledikten sonra bu üç nokta ve EnterCoords.w (heading) rahatça
-    -- ince ayarlanabilir (yalnızca sayı değişikliği, kod değişikliği gerekmez).
+    -- IsIplActive/GetInteriorAtCoords/IsInteriorReady sonuçlarını F8
+    -- konsoluna basar.
     Shell = {
-        EnterCoords  = vector4(1985.48132, 3828.76757, 32.5, 0.0),
-        WorkbenchPos = vector3(1986.3, 3829.3, 32.5),
-        PackagingPos = vector3(1984.6, 3829.8, 32.5),
-        ExitCoords   = vector4(1985.48132, 3828.76757, 32.5, 180.0)
+        EnterCoords  = vector4(261.4586, -998.8196, -99.00863, 0.0),
+        WorkbenchPos = vector3(262.4586, -997.8196, -99.00863),
+        PackagingPos = vector3(260.4586, -997.5196, -99.00863),
+        ExitCoords   = vector4(261.4586, -998.8196, -99.00863, 180.0)
     },
 
     -- ★ DÜZELTME: eskiden burada rastgele modelli KOZMETİK "ambient" NPC

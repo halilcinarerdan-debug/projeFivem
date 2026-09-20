@@ -141,39 +141,37 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
     insideTrapHouse = data.trap_house_id
     shellData        = data
 
-    -- ★ DÜZELTME (bob74_ipl'in GERÇEK kaynak kodu -- lib/common.lua --
-    -- okunarak doğrulandı): `Interior.Set(interior)` yalnızca `Interior.
-    -- Clear()` + `EnableIpl(interior, true)` yapar; `EnableIpl` da (aktif
-    -- ederken) düz natif `RequestIpl(ipl)` çağırır -- `RefreshInterior` BURADA
-    -- HİÇ DEVREYE GİRMEZ (yalnızca "Details" -- kask/evrak çantası gibi
-    -- interior İÇİ prop'lar -- için kullanılır, ana treyler IPL takası için
-    -- gerekmez). Yani bir önceki düzeltmede bu çağrının "render'ı bozduğu"
-    -- varsayımı YANLIŞTI; kaldırılmıştı, şimdi GÜVENLE geri eklendi.
-    -- `RequestIpl` zaten `IsIplActive` ile korunuyor (EnableIpl içinde), yani
-    -- bu çağrı bob74_ipl'in kendi `TrevorsTrailer.LoadDefault()` ile
-    -- başlangıçta yaptığı işin AYNISINI tekrar yapar -- ZARARSIZ ve
-    -- IDEMPOTENT. Amaç: bob74_ipl'in kendi tek seferlik başlangıç thread'i
-    -- herhangi bir sebeple (resource restart sırası, bu oyuncunun bob74_ipl
-    -- henüz tam başlamadan bağlanmış olması vb.) atlanmış olsa bile burada
-    -- YENİDEN talep edilmiş olur.
-    local iplOk, trailerObj = pcall(function() return exports['bob74_ipl']:GetTrevorsTrailerObject() end)
-    if iplOk and type(trailerObj) == 'table' and trailerObj.Interior and trailerObj.Interior.Set then
-        pcall(trailerObj.Interior.Set, trailerObj.Interior.trash)
+    -- ★ DÜZELTME (KÖKLÜ DEĞİŞİKLİK): Trevor'ın treyleri (interiorId 2562,
+    -- tek-oyunculu hikaye içeriği) bu sunucuda `PinInteriorInMemory` +
+    -- 15 saniye beklemeye rağmen `IsInteriorReady` HİÇBİR ZAMAN true
+    -- olmadı -- yani bu spesifik interior bu ortamda güvenilir şekilde
+    -- stream edilemiyor (muhtemelen eski/uyumsuz oyun build'i ile bu SP
+    -- içeriğinin entity-set yapısı arasında bir uyumsuzluk). Kullanıcı
+    -- kararıyla Trevor'ın treyleri TAMAMEN TERK EDİLDİ, yerine bob74_ipl'in
+    -- GTA Online "düşük gelirli ev" interior'ı (GTAOHouseLow1, interiorId
+    -- 149761) kullanılıyor. Bu tip DLC/çok-oyunculu interior'lar milyonlarca
+    -- GTA Online oyuncusu tarafından her gün kullanıldığından çok daha
+    -- güvenilir stream ediliyor; ayrıca API'si de basit: tek bir
+    -- `LoadDefault()` çağrısı yeterli (Trevor'ınki gibi ayrı bir
+    -- `Interior.Set(tidy/trash)` seçimi yok). Ek olarak `Smoke.Set(stage2)`
+    -- ile "hafif kirli/dumanlı" görünüm bedavaya elde ediliyor -- tam
+    -- istenen "hafif kirli ve tekinsiz mahalle evi" atmosferi.
+    local iplOk, houseObj = pcall(function() return exports['bob74_ipl']:GetGTAOHouseLow1Object() end)
+    if iplOk and type(houseObj) == 'table' and houseObj.LoadDefault then
+        pcall(houseObj.LoadDefault)
+        if houseObj.Smoke and houseObj.Smoke.Set and houseObj.Smoke.stage2 then
+            pcall(houseObj.Smoke.Set, houseObj.Smoke.stage2, true)
+        end
     else
-        print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya export basarisiz -- Trevor\'in treyleri dogru render OLMAYABILIR. Teshis icin "/traphouseipldebug" komutunu calistirin.')
+        print('[MATRIX:TRAPHOUSE:CLIENT] [UYARI] bob74_ipl kaynagi bulunamadi veya export basarisiz -- ic mekan dogru render OLMAYABILIR. Teshis icin "/traphouseipldebug" komutunu calistirin.')
     end
 
-    -- ★ TEŞHİS SONUCU 3: PinInteriorInMemory + 3sn IsInteriorReady beklemesi
-    -- yetmedi -- IsInteriorReady hala false. İki olasılık var: (a) bu
-    -- interior bu sunucuda/ortamda hiçbir zaman hazır olmuyor (gerçekten
-    -- bozuk), (b) sunucunun disk/streaming hızı 3 saniyeden UZUN sürüyor ve
-    -- kod pes edip yine de ışınlıyor. Bunu ayırt etmek için: ekran ÖNCE
-    -- karartılıyor (oyuncu hiçbir ara durum GÖRMÜYOR), pin beklemesi 3sn'den
-    -- 15sn'e çıkarıldı (hala kararmış ekran arkasında), VE ışınlama+bekleme
-    -- bitince gerçek sonuç konsola basılıyor -- bir sonraki testte
-    -- "IsInteriorReady 15sn icinde true oldu mu" sorusuna kesin cevap
-    -- alınacak; hayır ise (a) doğrulanmış olur ve bu interior'dan
-    -- vazgeçilmesi gerekir.
+    -- ★ Trevor deneyinden kalan genel (interior-bağımsız) pin/hazır bekleme
+    -- iskeleti korunuyor -- GTAOHouseLow1'in çok daha güvenilir stream
+    -- etmesi beklense de, ekranı ışınlamadan önce karartıp
+    -- PinInteriorInMemory/IsInteriorReady'i beklemek hâlâ zararsız bir
+    -- güvenlik payı (ve konsol çıktısı, bu yeni interior'da da sorun
+    -- çıkarsa aynı teşhis bilgisini verir).
     local enter = data.enter_coords
     if enter then
         local ped = PlayerPedId()
@@ -189,7 +187,7 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         if interiorId ~= 0 then
             PinInteriorInMemory(interiorId)
             local pinWaitStart = GetGameTimer()
-            while not IsInteriorReady(interiorId) and (GetGameTimer() - pinWaitStart) < 15000 do
+            while not IsInteriorReady(interiorId) and (GetGameTimer() - pinWaitStart) < 8000 do
                 Wait(50)
             end
             becameReady = IsInteriorReady(interiorId)
@@ -482,20 +480,18 @@ end)
 -- kaldırılabilir.
 -- =====================================================================
 RegisterCommand('traphouseipldebug', function()
-    local ok, trailerObj = pcall(function() return exports['bob74_ipl']:GetTrevorsTrailerObject() end)
-    print(('[TRAPHOUSE_IPL_DEBUG] export cagrisi basarili=%s trailerObj tip=%s'):format(tostring(ok), type(trailerObj)))
+    local ok, houseObj = pcall(function() return exports['bob74_ipl']:GetGTAOHouseLow1Object() end)
+    print(('[TRAPHOUSE_IPL_DEBUG] export cagrisi basarili=%s houseObj tip=%s'):format(tostring(ok), type(houseObj)))
 
-    if ok and type(trailerObj) == 'table' then
-        local interiorId = trailerObj.interiorId
-        local tidyName   = trailerObj.Interior and trailerObj.Interior.tidy
-        local trashName  = trailerObj.Interior and trailerObj.Interior.trash
-        print(('[TRAPHOUSE_IPL_DEBUG] interiorId=%s tidy=%s trash=%s'):format(tostring(interiorId), tostring(tidyName), tostring(trashName)))
-        print(('[TRAPHOUSE_IPL_DEBUG] IsIplActive(trash)=%s IsIplActive(tidy)=%s'):format(tostring(IsIplActive(trashName)), tostring(IsIplActive(tidyName))))
+    if ok and type(houseObj) == 'table' then
+        print(('[TRAPHOUSE_IPL_DEBUG] interiorId=%s'):format(tostring(houseObj.interiorId)))
     else
         print('[TRAPHOUSE_IPL_DEBUG] UYARI: bob74_ipl export cagrisi basarisiz oldu -- kaynak calismiyor veya export kaydolmamis.')
     end
 
-    local sx, sy, sz = 1985.48132, 3828.76757, 32.5
+    local shell = Config.TrapHouseInterior and Config.TrapHouseInterior.Shell
+    local ec = shell and shell.EnterCoords
+    local sx, sy, sz = (ec and ec.x) or 261.4586, (ec and ec.y) or -998.8196, (ec and ec.z) or -99.00863
     local interiorAt = GetInteriorAtCoords(sx, sy, sz)
     print(('[TRAPHOUSE_IPL_DEBUG] GetInteriorAtCoords(%.4f, %.4f, %.4f) = %s'):format(sx, sy, sz, tostring(interiorAt)))
     if interiorAt and interiorAt ~= 0 then
