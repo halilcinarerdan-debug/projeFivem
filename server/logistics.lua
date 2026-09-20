@@ -948,27 +948,48 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatc
 
     local origin = bot.state.coords
     if not IsValidCoords(origin) then
-        -- ★ Bot hiç fiziksel olarak var olmadıysa (yeni /botyarat edildi VEYA
-        -- sunucu yeniden başlatılıp DB'den taze yüklendi — main.lua
-        -- LoadBotsFromDatabase coords'u BİLİNÇLİ OLARAK nil bırakır) bot'un
-        -- kalıcı bir konumu yoktur. Önceden bu durumda sevk KALICI OLARAK
-        -- reddediliyordu (kullanıcı önce ayrı bir /botspawn yapmak zorundaydı).
-        -- Artık dispatcherSrc (komutu veren oyuncu) varsa, onun ANLIK konumu
-        -- botun başlangıç noktası olarak kullanılır — BeginPhysicalDispatch
-        -- zaten origin'de gerçek bir ped/araç yaratıyor, bu yüzden bot
-        -- "önceden spawn edilmiş" olmak ZORUNDA değildir. dispatcherSrc yoksa
-        -- (örn. konsoldan/export'tan çağrıldıysa) eski davranış (no_origin
-        -- reddi) AYNEN korunur.
-        if type(dispatcherSrc) == 'number' and dispatcherSrc > 0 then
+        -- ★ DÜZELTME (bu revizyon): Önceki sürüm burada dispatcherSrc'nin
+        -- KENDİ konumunu origin yapıyordu. /sevket'in destination'ı ZATEN
+        -- "komutu veren oyuncunun o anki konumu"dur — yani origin=destination
+        -- olan DEJENERE bir durum yaratıyordu: araç oyuncunun DİBİNDE spawn
+        -- olup mesafe ~0 olduğundan bir sonraki tick'te ANINDA "vardı"
+        -- sayılıyordu ("araba ışınlanıyor" hissi buradan geliyordu).
+        --
+        -- Şimdi: botun ATANDIĞI trap house varsa (bot.state.trap_house_id)
+        -- oradan başlar (tematik olarak doğru: dealer üssünden yola çıkar).
+        -- Atanmış trap house yoksa, matristeki HERHANGİ bir trap house
+        -- (deterministik: en küçük ID) "depo" olarak kullanılır — bu da
+        -- oyuncunun konumundan FARKLI olduğundan dejenere durumu önler.
+        -- Hiç trap house yoksa (çok nadir), dispatcherSrc'nin konumu sabit
+        -- bir ofsetle (+200m) kaydırılarak kullanılır; origin=destination
+        -- YİNE oluşmaz. dispatcherSrc de yoksa (konsol/export çağrısı)
+        -- eski davranış (no_origin reddi) korunur.
+        local fallbackHouse = bot.state.trap_house_id and Matrix.TrapHouses and Matrix.TrapHouses[bot.state.trap_house_id]
+
+        if not fallbackHouse and Matrix.TrapHouses then
+            local lowestId = nil
+            for id in pairs(Matrix.TrapHouses) do
+                if not lowestId or id < lowestId then lowestId = id end
+            end
+            fallbackHouse = lowestId and Matrix.TrapHouses[lowestId]
+        end
+
+        if fallbackHouse then
+            origin = fallbackHouse.coords
+            Matrix.Log('LOGISTICS',
+                '[ORIJIN VARSAYILANI] Bot #%d hic konumlanmamisti; trap house #%d (%s) baslangic olarak kullanildi.',
+                botId, fallbackHouse.id, fallbackHouse.label)
+        elseif type(dispatcherSrc) == 'number' and dispatcherSrc > 0 then
             local ped = GetPlayerPed(dispatcherSrc)
             if ped and ped ~= 0 then
                 local c = GetEntityCoords(ped)
-                origin = vector3(c.x, c.y, c.z)
+                origin = vector3(c.x, c.y + 200.0, c.z)
                 Matrix.Log('LOGISTICS',
-                    '[ORIJIN VARSAYILANI] Bot #%d hic konumlanmamisti; dispatcher src=%d konumu baslangic olarak kullanildi.',
+                    '[ORIJIN VARSAYILANI] Bot #%d hic konumlanmamisti ve matriste trap house yok; dispatcher src=%d konumu +200m ofsetle kullanildi.',
                     botId, dispatcherSrc)
             end
         end
+
         if not IsValidCoords(origin) then return false, 'no_origin' end
     end
 
