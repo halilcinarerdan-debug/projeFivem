@@ -16,15 +16,25 @@
 -- DEĞİŞTİRİLMEDİ) bir rütbesi olan oyuncular izin verilir — "Kartel'in
 -- parçası olmayan biri döküntü eve giremez" mantığı.
 --
--- ★ BOT ROUTING (dürüst entegrasyon notu): main.lua'nın kaynak koduna bu
--- oturumda erişim yoktu, bu yüzden "bot varışta otomatik interior'a girer"
--- akışı tam OTOMATİK bağlanamadı — bunun yerine Matrix.TrapHouseInterior.
--- RouteBotIntoInterior(botId, trapHouseId, botPedEntity) DIŞA AÇIK bir
--- fonksiyon olarak sunulur. main.lua'nın mevcut varış tespiti (Config.
--- Logistics.TrapHouseArrivalStashRadius kullanan döngü, bkz. config.lua
--- [U1] notu) bota ait ped entity handle'ını bulduğu noktada bu fonksiyonu
--- TEK SATIRLA çağırmalıdır. Bu dosya main.lua'ya dokunmadan, main.lua'nın
--- kendi kaynak koduna GÜVENMEDEN teslim edilmiştir.
+-- ★ BOT ROUTING (main.lua doğrulandıktan SONRAKİ düzeltme): main.lua'nın
+-- gerçek kaynağı incelendi — botlar STABİL/BEKLEMEDE durumundayken (yani
+-- bir dispatch'in DIŞINDA) DÜNYADA HİÇ SPAWN EDİLMİŞ bir ped'e sahip
+-- DEĞİLDİR (bot.state.spawned=false, net_id=nil). Bir sevkiyat 'arrived'
+-- ile kapandığında (Matrix.CompleteDispatch, main.lua) ped zaten AYNI
+-- fonksiyon içinde SafeDeleteEntity ile dünyadan silinir — yani "varışta
+-- bota ait canlı bir ped handle'ı yakalayıp bucket'a taşı" diye bir
+-- entegrasyon noktası main.lua'nın gerçek mimarisinde YOKTUR (daha önceki
+-- sürümdeki yorum bunu main.lua'yı görmeden yanlış varsaymıştı — düzeltildi).
+-- Matrix.TrapHouseInterior.RouteBotIntoInterior(botId, trapHouseId, ped)
+-- yine de DIŞA AÇIK bırakıldı: yalnızca ped/araç spawn eden bir dispatch
+-- AKTİFKEN (Matrix.Dispatches[botId] doluyken, ped dispatch.entity_net_id
+-- üzerinden çözülebilirken) anlamlıdır — sunucu operatörü ileride "bot
+-- rotasının SON bacağı trap house kapısındaysa, ped silinmeden ÖNCE onu
+-- bucket'a al" gibi bir davranış eklemek isterse main.lua'ya TEK SATIRLIK
+-- bir çağrı (CompleteDispatch'in entity silme adımından ÖNCE) ile
+-- bağlanabilir. Şu an için bu dosyanın asıl işlevi — oyuncu giriş/çıkışı,
+-- envanter operasyonları — main.lua'dan TAMAMEN bağımsız ve TAM ÇALIŞIR
+-- durumdadır; bot-routing salt bir gelecek-genişletme kancasıdır.
 -- =====================================================================
 
 Matrix.TrapHouseInterior = Matrix.TrapHouseInterior or {}
