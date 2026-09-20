@@ -471,11 +471,81 @@ local function OpenCanliKadroRaporu()
     lib.showContext('matrix_roster_report')
 end
 
-local function OpenTacticalMenu()
+-- =====================================================================
+-- ★ KATMAN 5 EK EMİR: "OPERASYON NOT DEFTERİ" (Matrix Notepad)
+-- Saf lib.inputDialog tabanlı, monokrom bir taktik not defteri. Notlar
+-- YALNIZCA client RAM'inde (savedMatrixNotes) tutulur — sunucuya HİÇ
+-- gönderilmez, bu yüzden ağ/enjeksiyon yüzeyi açmaz. Standart Ctrl+C/
+-- Ctrl+V (Windows panosu) davranışı, alan zaten sıradan bir NUI metin
+-- kutusu olduğundan NATİF olarak çalışır — bunun için ayrı bir özel NUI
+-- köprüsü YAZILMASI GEREKMEZ (ve burada zaten böyle bir şey yok, o yüzden
+-- "bozulacak" bir şey de yok). Aktif GPS işaretini (haritaya çift tıkla
+-- konan mor waypoint) doğrudan oyun native'lerinden OKUYARAK panoya hiç
+-- ihtiyaç duymadan not defterine otomatik ekler — daha güvenilir bir çözüm.
+-- =====================================================================
+local MAX_NOTEPAD_LENGTH = 4000 -- degenere/asiri buyume savunmasi (RAM-bomb)
+
+local savedMatrixNotes = '' -- oturum boyunca (resource restart'a kadar) kalici RAM onbellegi
+
+local OpenTacticalMenu -- ★ ileri bildirim: not defteri kapanınca F10'a dönmek için
+
+--- Aktif GPS işaretini (haritaya çift tıklamayla konan mor waypoint) yakalar.
+--- Waypoint blip'leri 2D'dir (Z taşımaz) — makul bir yaklaşım olarak
+--- oyuncunun mevcut Z'si kullanılır.
+local function CaptureActiveWaypointText()
+    if not IsWaypointActive() then return nil end
+    local waypointBlip = GetFirstBlipInfoId(8)
+    if not DoesBlipExist(waypointBlip) then return nil end
+
+    local wp  = GetBlipInfoIdCoord(waypointBlip)
+    local ped = PlayerPedId()
+    local pc  = GetEntityCoords(ped)
+    return ('%.1f %.1f %.1f'):format(wp.x, wp.y, pc.z)
+end
+
+local function OpenMatrixNotepad()
+    -- ★ Kalıcı önbellek: not defteri son kaydedilen haliyle açılır.
+    local defaultValue = savedMatrixNotes
+    local waypointHint = CaptureActiveWaypointText()
+    if waypointHint and not defaultValue:find(waypointHint, 1, true) then
+        defaultValue = (defaultValue ~= '' and (defaultValue .. '\n') or '') .. waypointHint
+    end
+
+    local input = lib.inputDialog('=== MATRIX NOTEPAD — OPERASYON NOT DEFTERI ===', {
+        {
+            type        = 'textarea',
+            label       = 'Taktik Notlar / Koordinatlar',
+            description = 'Ctrl+V ile Windows panosundan yapıştırabilirsiniz. Aktif GPS işareti varsa otomatik eklendi.',
+            default     = defaultValue,
+            required    = false
+        }
+    })
+
+    if input then
+        local text = tostring(input[1] or '')
+        if #text > MAX_NOTEPAD_LENGTH then
+            text = text:sub(#text - MAX_NOTEPAD_LENGTH + 1) -- en eski kismi kirp, son yazilani koru
+        end
+        savedMatrixNotes = text
+    end
+
+    -- ★ Kapanış yolundan BAĞIMSIZ (Kaydet ya da İptal/Esc) — oyuncu F10
+    -- akışından kopmasın diye Taktik Komuta Menüsüne otomatik döner.
+    Wait(50)
+    OpenTacticalMenu()
+end
+
+OpenTacticalMenu = function()
     lib.registerContext({
         id = 'matrix_tactical_menu',
         title = '=== TAKTIK KOMUTA MENUSU ===',
         options = {
+            {
+                title       = 'OPERASYON NOT DEFTERI',
+                description = 'Serbest metin taktik not defteri (Matrix Notepad) — RAM önbellekli',
+                icon        = 'note-sticky',
+                onSelect    = OpenMatrixNotepad
+            },
             {
                 title       = 'Canlı Kadro & Hiyerarşi Raporu',
                 description = 'Tum aktif bot ve oyuncu unsurlarini anlik olarak listele',
