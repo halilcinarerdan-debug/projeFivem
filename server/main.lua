@@ -1324,7 +1324,7 @@ lib.callback.register('matrix:callback:getRosterReport', function(src)
         if #lines >= ROSTER_REPORT_MAX_LINES then break end
         if bot.status == 'active' then
             local durum = bot.state.is_locked and 'MESGUL / INTIKALDE' or 'STABIL / BEKLEMEDE'
-            lines[#lines + 1] = ('[ID: %d] - %s | Rol: STREET DEALER | Durum: %s'):format(id, bot.name, durum)
+            lines[#lines + 1] = ('[BOT-ID: %d] - %s | Rol: STREET DEALER | Durum: %s'):format(id, bot.name, durum)
         end
     end
 
@@ -1344,7 +1344,11 @@ lib.callback.register('matrix:callback:getRosterReport', function(src)
                     and ('%s %s'):format(charinfo.firstname, charinfo.lastname)
                     or ('Oyuncu-%d'):format(playerSrc)
 
-                lines[#lines + 1] = ('[ID: %d] - %s | Rutbe: %s | Yetki: %s'):format(
+                -- ★ HATA DÜZELTMESİ: 'PLR-ID' öneki botların 'BOT-ID'
+                -- indeksiyle KESİNLİKLE çakışmaz — aynı sayısal değer
+                -- (örn. Bot #1 ile Server ID 1) artık görsel olarak
+                -- ayrıştırılmış iki farklı ad alanında listelenir.
+                lines[#lines + 1] = ('[PLR-ID: %d] - %s | Rutbe: %s | Yetki: %s'):format(
                     playerSrc, name, rankLabel, yetki)
             end
         end
@@ -1501,6 +1505,54 @@ local function SafeForwardCoords(src, distance)
     )
 end
 
+--- ★ HATA DÜZELTMESİ: Bir sevk/rota komutunun dispatch ORIGIN'i botun
+--- KENDİ son bilinen konumu olmalıdır — komutu tetikleyen OYUNCUNUN
+--- konumu DEĞİL. (Önceki /rotaciz sürümü SafeForwardCoords(src, ...) ile
+--- oyuncunun önünü kullanıyordu; bu, dispatch her tetiklendiğinde botu
+--- oyuncunun yanına "ışınlıyordu" — SpawnDispatchActors zaten var olan
+--- ped'i despawn edip origin'de yeniden doğuruyor.)
+---
+--- server/logistics.lua'nın Matrix.Logistics.DispatchDealer fonksiyonu
+--- (gerçek /sevket'in arkasındaki motor) AYNI sorunu ZATEN doğru şekilde
+--- çözmüş — burası o kanıtlanmış öncelik zincirini BİREBİR izler
+--- (tutarlılık için):
+---   1) bot.state.coords — botun canlı/son bilinen gerçek konumu.
+---   2) Botun kendi trap_house_id'sine bağlı trap house koordinatı.
+---   3) Matristeki EN DÜŞÜK ID'li trap house (genel "ana üs" varsayılanı).
+---   4) SON ÇARE: dispatcherSrc'nin konumu + 200m Y ofseti — botu
+---      oyuncunun YANINA değil, oyuncudan gözle görülür şekilde uzakta
+---      makul bir noktaya yerleştirir (ışınlanma hissi vermez).
+--- Hiçbiri yoksa nil döner — çağıran taraf oyuncunun konumuna SESSİZCE
+--- geri düşmez, açık bir hata ile reddeder.
+local function ResolveBotOrigin(bot, dispatcherSrc)
+    if not bot then return nil end
+    if bot.state.coords then return bot.state.coords end
+
+    local trapHouseId = bot.state.trap_house_id
+    local house = trapHouseId and Matrix.TrapHouses and Matrix.TrapHouses[trapHouseId]
+    if house and house.coords then return house.coords end
+
+    if Matrix.TrapHouses then
+        local lowestId = nil
+        for id in pairs(Matrix.TrapHouses) do
+            if not lowestId or id < lowestId then lowestId = id end
+        end
+        if lowestId and Matrix.TrapHouses[lowestId].coords then
+            return Matrix.TrapHouses[lowestId].coords
+        end
+    end
+
+    if type(dispatcherSrc) == 'number' and dispatcherSrc > 0 then
+        local ped = GetPlayerPed(dispatcherSrc)
+        if ped and ped ~= 0 then
+            local c = GetEntityCoords(ped)
+            return vector3(c.x, c.y + 200.0, c.z)
+        end
+    end
+
+    return nil
+end
+
 RegisterCommand('coords', function(src)
     local ped = GetPlayerPed(src)
     if not ped or ped == 0 then Reply(src, 'Ped bulunamadi.'); return end
@@ -1577,7 +1629,8 @@ end
 
 RegisterCommand('rotaciz', function(src, args)
     local botId = tonumber(args[1])
-    if not botId or not Matrix.Bots[botId] then
+    local bot   = botId and Matrix.Bots[botId]
+    if not bot then
         Reply(src, 'Kullanim: /rotaciz [botId] [wp1|nil] [wp2|nil] [wp3|nil] [finalHedef] [plaka] [aracTipi] (wp1-3 bos/"nil" olabilir)')
         return
     end
@@ -1614,15 +1667,23 @@ RegisterCommand('rotaciz', function(src, args)
         vehicleType = Config.Logistics.DefaultVehicleType
     end
 
-    local origin = SafeForwardCoords(src, 2.0)
-    if not origin then Reply(src, 'Rota baslatmak icin gecerli bir ped gerekli.'); return end
+    -- ★ HATA DÜZELTMESİ: origin BOTUN kendi son bilinen konumudur — komutu
+    -- tetikleyen oyuncunun konumu DEĞİL (bkz. ResolveBotOrigin). Bot artık
+    -- rota her çizildiğinde oyuncunun yanına ışınlanmıyor; dünyaya
+    -- enjekte edildiği/en son bulunduğu uzak noktadan asfalttan yola çıkıyor.
+    -- dispatcherSrc (src) yalnızca EN SON çare fallback'inde kullanılır.
+    local origin = ResolveBotOrigin(bot, src)
+    if not origin then
+        Reply(src, ('Bot #%d icin gecerli bir baslangic konumu bulunamadi (trap house yok, dispatcher ped cozulemedi).'):format(botId))
+        return
+    end
 
     local ok, err, legIndex, legDist = Matrix.BeginRouteDispatch(botId, origin, waypoints, finalCoords, plate, vehicleType, src)
     if ok then
         Reply(src, ('[ROTA CIZILDI] Bot #%d icin %d ugraklik taktik kacis rotasi baslatildi.'):format(botId, #waypoints + 1))
     elseif err == 'too_close' and legIndex then
         local totalLegs = #waypoints + 1
-        local fromLabel = (legIndex == 1) and 'Oyuncu Konumu' or ('Ugrak #%d'):format(legIndex - 1)
+        local fromLabel = (legIndex == 1) and 'Bot Konumu' or ('Ugrak #%d'):format(legIndex - 1)
         local toLabel   = (legIndex == totalLegs) and 'Final Hedef' or ('Ugrak #%d'):format(legIndex)
         Reply(src, ('Rota baslatilamadi: %s -> %s arasi cok yakin (%.1fm < %.1fm gerekli). Isinlanma korumasi engelledi.'):format(
             fromLabel, toLabel, legDist or 0.0, Config.Logistics.MinDispatchDistanceMeters))
