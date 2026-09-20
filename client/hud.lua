@@ -349,6 +349,27 @@ RegisterNetEvent('matrix:client:weaponJamStateChanged', function(slot, jammed)
     weaponJamSlot    = jammed and slot or nil
 end)
 
+-- =====================================================================
+-- ★ DÜZELTME: KOMUT SONUÇ BİLDİRİMİ (silent-failure önleme)
+-- F10 menüsünden tetiklenen komutlar (/operatiftasfiye, /panikiptal, vb.)
+-- şimdiye kadar YALNIZCA chat:addMessage ile cevap veriyordu — oyuncunun
+-- chat penceresi kapalıysa (FiveM'de varsayılan, T'ye basılana kadar) bir
+-- rütbe reddi veya hata SESSİZCE kayboluyor, "tıkladım ama hiçbir şey
+-- olmuyor" izlenimi veriyordu. Artık bu komutlar SONUCU (başarılı/
+-- başarısız, sebebiyle) AYRICA bu event üzerinden de gönderir; burada
+-- lib.notify ile EKRANDA gösterilir — chat açık olsun olmasın görülür.
+-- =====================================================================
+RegisterNetEvent('matrix:client:actionNotify', function(ok, message)
+    if lib and lib.notify then
+        lib.notify({
+            title       = ok and '[ISLEM BASARILI]' or '[ISLEM BASARISIZ]',
+            description = tostring(message or ''),
+            type        = ok and 'success' or 'error',
+            duration    = 6000
+        })
+    end
+end)
+
 local lastWeaponHash = nil
 local lastAmmoInClip = nil
 
@@ -580,6 +601,22 @@ end
 -- =====================================================================
 local OpenAssignInspectorDialog -- ileri bildirim (OpenBotActionsMenu tarafından kullanilir)
 
+--- ★ DÜZELTME: butona basıldığı AN (sunucu cevabı beklenmeden) küçük bir
+--- onay bildirimi basar — böylece "tıkladım ama bir şey olmuyor" hissi
+--- ortadan kalkar: tıklama gerçekten kaydedildiyse HER ZAMAN görülür.
+--- Kesin sonuç (başarılı/başarısız) 'matrix:client:actionNotify' ile
+--- sunucudan ayrıca gelir (bkz. asağıdaki RegisterNetEvent).
+local function NotifyActionSent(label)
+    if lib and lib.notify then
+        lib.notify({
+            title       = '[KOMUT GONDERILDI]',
+            description = label,
+            type        = 'inform',
+            duration    = 2000
+        })
+    end
+end
+
 local function OpenBotActionsMenu(botId, roleLabel)
     local options = {
         {
@@ -587,7 +624,10 @@ local function OpenBotActionsMenu(botId, roleLabel)
             description = 'Botu matristen ve RAM onbellekten KALICI olarak siler (Hard-Delete). Geri alinamaz.',
             icon        = 'user-slash',
             iconColor   = '#ff4444',
-            onSelect    = function() ExecuteCommand(('operatiftasfiye %d'):format(botId)) end
+            onSelect    = function()
+                NotifyActionSent(('Bot #%d tasfiye emri gonderiliyor...'):format(botId))
+                ExecuteCommand(('operatiftasfiye %d'):format(botId))
+            end
         },
         {
             -- ★ KATMAN 5 ULTIMATE [U8]: sunucu, botun su an aktif bir
@@ -599,7 +639,10 @@ local function OpenBotActionsMenu(botId, roleLabel)
             description = 'Botun mevcut rotasini/mutex kilidini kirar, isinlanma OLMADAN son hizla senin konumuna yollar.',
             icon        = 'truck-medical',
             iconColor   = '#ff4444',
-            onSelect    = function() ExecuteCommand(('panikiptal %d'):format(botId)) end
+            onSelect    = function()
+                NotifyActionSent(('Bot #%d icin acil tahliye emri gonderiliyor...'):format(botId))
+                ExecuteCommand(('panikiptal %d'):format(botId))
+            end
         }
     }
 
@@ -659,19 +702,42 @@ local function OpenCanliKadroRaporu()
         return
     end
 
+    -- ★ DÜZELTME: bot ID'leri (Matrix.NextBotId) ve oyuncu server ID'leri
+    -- (FiveM connection slot) TAMAMEN BAĞIMSIZ iki sayaçtır — aynı sayısal
+    -- degere (örn. ikisi de "1") sahip olmaları normaldir ve ÇAKIŞMA
+    -- DEĞİLDİR. Ama tek bir düz listede yan yana göründüklerinde "[BOT-ID: 1]"
+    -- ile "[PLR-ID: 1]" birbirine KARIŞIYORDU (oyuncular yanlışlıkla
+    -- kendi/başka bir oyuncunun devre dışı satırına tıklamaya çalışıyordu).
+    -- Bu yüzden liste artık İKİ AYRI, başlıklı bölüme (BOTLAR / OYUNCULAR)
+    -- kesin olarak ayrılır; ayrıca yalnızca BOT satırları `arrow = true`
+    -- ile (bir alt menü açacağını gösteren sağ ok) işaretlenir — OYUNCU
+    -- satırları HİÇBİR ZAMAN tıklanabilir değildir (disabled = true).
+    -- `#options + 1` ile eklenir (index bazlı `options[i]` DEĞİL) — böylece
+    -- filtrelenen bir satır olsa bile dizide ASLA boşluk (hole) oluşmaz.
     local options = {}
+    local botHeaderAdded, playerHeaderAdded = false, false
+
     for i = 1, #entries do
         local e = entries[i]
         if type(e) == 'table' and type(e.text) == 'string' then
             if e.kind == 'bot' and type(e.id) == 'number' then
-                options[i] = {
+                if not botHeaderAdded then
+                    options[#options + 1] = { title = '=== BOTLAR (BOT-ID) — TIKLA, ISLEM MENUSU ACILIR ===', disabled = true, icon = 'robot' }
+                    botHeaderAdded = true
+                end
+                options[#options + 1] = {
                     title     = e.text,
                     icon      = e.mole_flagged and 'triangle-exclamation' or 'circle-dot',
                     iconColor = e.mole_flagged and '#ff4444' or nil,
+                    arrow     = true,
                     onSelect  = function() OpenBotActionsMenu(e.id, e.role) end
                 }
             else
-                options[i] = { title = e.text, disabled = true, icon = 'circle-dot' }
+                if not playerHeaderAdded then
+                    options[#options + 1] = { title = '=== OYUNCULAR (PLR-ID) — BILGI AMACLI, TIKLANAMAZ ===', disabled = true, icon = 'user' }
+                    playerHeaderAdded = true
+                end
+                options[#options + 1] = { title = e.text, disabled = true, icon = 'circle-dot' }
             end
         end
     end

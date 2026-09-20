@@ -1790,6 +1790,21 @@ local function Reply(src, msg)
     end
 end
 
+--- ★ DÜZELTME: Reply() YALNIZCA chat:addMessage kullanıyordu — oyuncunun
+--- chat penceresi kapalıysa (FiveM'de varsayılan davranış) bir rütbe
+--- reddi/hata SESSİZCE kayboluyor, "tıkladım ama hiçbir şey olmuyor"
+--- izlenimi veriyordu (bkz. F10 -> Canlı Kadro -> Operatif Tasfiye/Acil
+--- Tahliye). Bu yardımcı AYNI mesajı hem chat'e (Reply, geriye dönük
+--- uyum) hem de client/hud.lua'nın lib.notify ile EKRANDA gösterdiği
+--- 'matrix:client:actionNotify' event'ine gönderir — chat açık olsun
+--- olmasın sonuç HER ZAMAN görülür.
+local function NotifyResult(src, ok, msg)
+    Reply(src, msg)
+    if type(src) == 'number' and src > 0 then
+        TriggerClientEvent('matrix:client:actionNotify', src, ok, msg)
+    end
+end
+
 local function SafeForwardCoords(src, distance)
     if type(src) ~= 'number' or src <= 0 then return nil end
     local ped = GetPlayerPed(src)
@@ -1904,17 +1919,17 @@ end, false)
 -- =====================================================================
 RegisterCommand('operatiftasfiye', function(src, args)
     local botId = tonumber(args[1])
-    if not botId then Reply(src, 'Kullanim: /operatiftasfiye [botId]'); return end
+    if not botId then NotifyResult(src, false, 'Kullanim: /operatiftasfiye [botId]'); return end
 
     if Matrix.Hierarchy and Matrix.Hierarchy.HasCommandAuthority then
         local assignerState = Matrix.GetOrCreatePlayerState(src)
         if not assignerState or not assignerState.citizenid or not Matrix.Hierarchy.HasCommandAuthority(assignerState.citizenid) then
-            Reply(src, 'Bu emri vermek icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
+            NotifyResult(src, false, 'Bu emri vermek icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
         end
     end
 
     if not Matrix.Bots[botId] then
-        Reply(src, ('Bot #%d matriste bulunamadi.'):format(botId)); return
+        NotifyResult(src, false, ('Bot #%d matriste bulunamadi.'):format(botId)); return
     end
 
     local ok
@@ -1925,9 +1940,9 @@ RegisterCommand('operatiftasfiye', function(src, args)
     end
 
     if ok then
-        Reply(src, ('[TASFIYE TAMAMLANDI] Bot #%d matristen ve RAM onbellekten kalici olarak silindi (Hard-Delete).'):format(botId))
+        NotifyResult(src, true, ('[TASFIYE TAMAMLANDI] Bot #%d matristen ve RAM onbellekten kalici olarak silindi (Hard-Delete).'):format(botId))
     else
-        Reply(src, ('Bot #%d tasfiye edilemedi.'):format(botId))
+        NotifyResult(src, false, ('Bot #%d tasfiye edilemedi.'):format(botId))
     end
 end, false)
 
@@ -1951,20 +1966,20 @@ local PANIC_EVAC_FAILURE_MESSAGES = {
 
 RegisterCommand('panikiptal', function(src, args)
     local botId = tonumber(args[1])
-    if not botId then Reply(src, 'Kullanim: /panikiptal [botId]'); return end
+    if not botId then NotifyResult(src, false, 'Kullanim: /panikiptal [botId]'); return end
 
     if Matrix.Hierarchy and Matrix.Hierarchy.HasCommandAuthority then
         local callerState = Matrix.GetOrCreatePlayerState(src)
         if not callerState or not callerState.citizenid or not Matrix.Hierarchy.HasCommandAuthority(callerState.citizenid) then
-            Reply(src, 'Bu emri vermek icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
+            NotifyResult(src, false, 'Bu emri vermek icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
         end
     end
 
     local ok, reason = Matrix.TriggerPanicEvacuation(botId, src)
     if ok then
-        Reply(src, ('[ACIL TAHLIYE TETIKLENDI] Bot #%d gorevini terk etti, son hizla sana dogru geliyor.'):format(botId))
+        NotifyResult(src, true, ('[ACIL TAHLIYE TETIKLENDI] Bot #%d gorevini terk etti, son hizla sana dogru geliyor.'):format(botId))
     else
-        Reply(src, PANIC_EVAC_FAILURE_MESSAGES[reason] or ('Acil tahliye tetiklenemedi: %s'):format(tostring(reason)))
+        NotifyResult(src, false, PANIC_EVAC_FAILURE_MESSAGES[reason] or ('Acil tahliye tetiklenemedi: %s'):format(tostring(reason)))
     end
 end, false)
 
