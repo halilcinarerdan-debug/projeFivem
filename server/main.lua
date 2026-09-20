@@ -74,6 +74,16 @@
 --        (Operatif Tasfiye Et / Denetleyici Olarak Ata) ve SIGINT köstebek
 --        bülteni (Matrix.Inspector.IsMoleFlagged, server/market.lua) rapora
 --        kırmızı bir bültene çevrilmeden ham metin olarak işlenebilsin diye.
+--   [U7] YAYA BOT TAKILMA/SIKIŞMA MUHAFIZI (Anti-Stuck): yaya (vehicle_type
+--        == 'foot') dispatch'lerde TaskGoStraightToCoord (düz çizgi, engel
+--        farkında değil — karmaşık mimari/kapalı alanda duvara saplanıp
+--        kalabiliyordu) TaskFollowNavMeshToCoord ile DEĞİŞTİRİLDİ: GTA V'in
+--        yerel yaya NavMesh ağını kullanan, engellerin etrafından otomatik
+--        dolanan asenkron bir görev. Üç çağrı noktası da (ilk sevk, rota
+--        zinciri ilerleyişi, periyodik görev-yenileme) güncellendi; araç
+--        dispatch'leri (TaskVehicleDriveToCoord) DEĞİŞMEDİ. Yeni bir
+--        thread/Wait YOK — ilerleme yine mevcut TickPhysicalDispatches
+--        tick döngüsü tarafından izlenir, 0 Resmon bütçesi korunur.
 -- =====================================================================
 
 -- ---------- Upvalue localization (perf) ----------
@@ -110,7 +120,11 @@ local GetPlayerPed              = GetPlayerPed
 local GetEntityCoords           = GetEntityCoords
 local GetEntityHeading          = GetEntityHeading
 local TaskVehicleDriveToCoord   = TaskVehicleDriveToCoord
-local TaskGoStraightToCoord     = TaskGoStraightToCoord
+-- ★ KATMAN 5 ULTIMATE [U7]: yaya botlar için NavMesh tabanlı, engellerin
+-- etrafından dolanan asenkron yürüyüş görevi (bkz. dosya içi [U7] notu).
+-- TaskGoStraightToCoord (düz çizgi, engel-körü) artık YAYA dispatch'lerde
+-- HİÇ KULLANILMIYOR — bu yüzden localize edilmedi.
+local TaskFollowNavMeshToCoord  = TaskFollowNavMeshToCoord
 local TriggerClientEvent        = TriggerClientEvent
 local RegisterCommand           = RegisterCommand
 local RegisterNetEvent          = RegisterNetEvent
@@ -618,6 +632,26 @@ local DISPATCH_BUSTED_DWELL_TICKS     = 8
 local DISPATCH_ALPR_RADIUS_M          = 250.0
 local DISPATCH_TASK_REISSUE_TICKS     = 25
 
+-- ★ KATMAN 5 ULTIMATE [U7]: YAYA BOT TAKILMA/SIKIŞMA MUHAFIZI (Anti-Stuck)
+-- Yaya (vehicle_type == 'foot') dispatch'ler artık TaskGoStraightToCoord
+-- (düz çizgi, engel farkında DEĞİL — karmaşık mimarilerde/kapalı alanlarda
+-- duvara saplanıp kalabiliyordu) YERİNE TaskFollowNavMeshToCoord kullanır:
+-- bu, GTA V'in yerel yaya NavMesh yol ağını kullanan, engellerin etrafından
+-- OTOMATİK dolanan (pathfinding) asenkron bir görevdir. "Asenkron" olma
+-- özelliği DEĞİŞMEDİ — tıpkı eski TaskGoStraightToCoord gibi bu da bir
+-- "ateşle-unut" (fire-and-forget) görev atamasıdır; ped'in ilerlemesi
+-- her zamanki gibi TickPhysicalDispatches'in kendi mesafe/tick döngüsü
+-- tarafından asenkron olarak izlenir (bu dosyada 0 Resmon bütçesini bozacak
+-- YENİ bir thread/Wait YOKTUR). stoppingRange=0.0 bırakılır — "vardı mı"
+-- kararı zaten dışarıdaki DISPATCH_ARRIVAL_RADIUS_M kontrolüne aittir;
+-- persistFollowing=false — mevcut DISPATCH_TASK_REISSUE_TICKS periyodik
+-- yeniden-görevlendirme güvenlik ağı (aşağıda, değişmedi) zaten görevi
+-- düzenli aralıklarla tazeliyor. Araç (vehicle_net_id dolu) dispatch'leri
+-- BU DEĞİŞİKLİKTEN ETKİLENMEZ — TaskVehicleDriveToCoord aynen kalıyor.
+local NAVMESH_TASK_TIMEOUT            = -1  -- sinirsiz (TaskGoStraightToCoord ile ayni davranis)
+local NAVMESH_STOPPING_RANGE_M        = 0.0 -- varis karari TickPhysicalDispatches'e ait
+local NAVMESH_PERSIST_FOLLOWING       = false
+
 local DISPATCH_BASE_FOOT_SPEED_MS     = 1.4
 local DISPATCH_BASE_VEHICLE_SPEED_MS  = 15.0
 local DISPATCH_MIN_SPEED_FRACTION     = 0.25
@@ -744,10 +778,14 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
         pcall(SetEntityOrphanMode, ped, 2) -- KeepEntity: server entity'yi asla silmez
         SetEntityCoords(ped, origin.x, origin.y, origin.z, false, false, false, false)
 
-        local taskOk = pcall(TaskGoStraightToCoord,
+        -- ★ [U7] NavMesh tabanli asenkron yuruyus - engellerin etrafindan
+        -- dolanir, TaskGoStraightToCoord'un aksine duvara/geometriye saplanip
+        -- kalmaz.
+        local taskOk = pcall(TaskFollowNavMeshToCoord,
             ped,
             firstDestination.x, firstDestination.y, firstDestination.z,
-            cruiseSpeed, -1, 0.0, 0.5
+            cruiseSpeed, NAVMESH_TASK_TIMEOUT, NAVMESH_STOPPING_RANGE_M,
+            NAVMESH_PERSIST_FOLLOWING, 0.0
         )
         if not taskOk then
             SafeDeleteEntity(ped)
@@ -1195,10 +1233,12 @@ local function AdvanceRouteWaypoint(ped, dispatch, botId)
             )
         end
     else
-        pcall(TaskGoStraightToCoord,
+        -- ★ [U7] NavMesh tabanli asenkron yuruyus (bkz. dosya basi notu).
+        pcall(TaskFollowNavMeshToCoord,
             ped,
             dispatch.destination.x, dispatch.destination.y, dispatch.destination.z,
-            reissueSpeed, -1, 0.0, 0.5
+            reissueSpeed, NAVMESH_TASK_TIMEOUT, NAVMESH_STOPPING_RANGE_M,
+            NAVMESH_PERSIST_FOLLOWING, 0.0
         )
     end
 
@@ -1329,10 +1369,12 @@ function Matrix.TickPhysicalDispatches()
                                     )
                                 end
                             else
-                                pcall(TaskGoStraightToCoord,
+                                -- ★ [U7] NavMesh tabanli asenkron yuruyus (bkz. dosya basi notu).
+                                pcall(TaskFollowNavMeshToCoord,
                                     ped,
                                     dispatch.destination.x, dispatch.destination.y, dispatch.destination.z,
-                                    reissueSpeed, -1, 0.0, 0.5
+                                    reissueSpeed, NAVMESH_TASK_TIMEOUT, NAVMESH_STOPPING_RANGE_M,
+                                    NAVMESH_PERSIST_FOLLOWING, 0.0
                                 )
                             end
                         end
