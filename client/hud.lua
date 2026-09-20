@@ -129,6 +129,22 @@ local function SanitizeWaypointArg(v)
     return s
 end
 
+--- ★ [E3] DİNAMİK WAYPOINT ESNEKLİĞİ: ara uğrak alanları (1-3) artık
+--- ZORUNLU DEĞİL. Boş bırakılan bir alan GEÇERLİDİR — sabit bir "atla"
+--- placeholder'ı (ROUTE_WAYPOINT_SKIP) döner; ExecuteCommand tek argüman
+--- beklediği için boş string GÖNDERİLEMEZ (pozisyonel argümanları kaydırır),
+--- bu yüzden boş bırakma her zaman bu sabit, boşluksuz token ile temsil
+--- edilir. DOLU bir alan yine [S1] ile aynı katı SanitizeWaypointArg
+--- kontrolünden geçer — geçersizse (harf/quote/vb.) nil döner (komut iptal).
+local ROUTE_WAYPOINT_SKIP = 'nil'
+
+local function SanitizeOptionalWaypointArg(v)
+    if v == nil then return ROUTE_WAYPOINT_SKIP end
+    local trimmed = tostring(v):match('^%s*(.-)%s*$')
+    if trimmed == '' then return ROUTE_WAYPOINT_SKIP end
+    return SanitizeWaypointArg(trimmed)
+end
+
 --- ★ [E2] Araç tipi arg: whitelist Config.Logistics.VehicleTypes anahtarlarından
 --- türetilir (paylaşımlı Config, client'ta da görünür) — sabit metin dışında
 --- hiçbir şey ExecuteCommand'a geçmez.
@@ -338,12 +354,14 @@ local function OpenRutbeAtaDialog()
     ExecuteCommand(('rutbeata %s %s'):format(targetSrc, rank))
 end
 
---- ★ [E2] "Rota Çiz" — Multi-Waypoint Taktik Rota Motoru diyaloğu.
---- 3 ara uğrak + 1 final hedef toplanır; her alan ya "x,y,z" vektörü ya da
---- bir Trap House ID'sidir. Tüm alanlar [S1] ile aynı sıkılıkta sanitize
---- edilir; format çözümlemesi (koordinat mı, trap house mu) ve fiziksel
---- güvenlik guard'ları (ışınlanma koruması, Co-Op Mutex) sunucu tarafında
---- (server/main.lua: /rotaciz) yürütülür.
+--- ★ [E2][E3] "Rota Çiz" — Multi-Waypoint Taktik Rota Motoru diyaloğu.
+--- 0-3 ara uğrak (ARTIK ZORUNLU DEĞİL, boş bırakılabilir) + 1 ZORUNLU final
+--- hedef toplanır; her alan ya "x,y,z" vektörü ya da bir Trap House ID'sidir.
+--- Dolu alanlar [S1] ile aynı sıkılıkta sanitize edilir; boş bırakılan ara
+--- uğraklar ROUTE_WAYPOINT_SKIP placeholder'ı ile gönderilip sunucu
+--- tarafında (server/main.lua: /rotaciz) rota zincirinden drop edilir.
+--- Format çözümlemesi (koordinat mı, trap house mu) ve fiziksel güvenlik
+--- guard'ları (ışınlanma koruması, Co-Op Mutex) da sunucu tarafında yürütülür.
 local function OpenRotaCizDialog()
     local input = lib.inputDialog('/rotaciz - Multi-Waypoint Taktik Rota', {
         {
@@ -352,22 +370,22 @@ local function OpenRotaCizDialog()
             required = true, min = 1, max = MAX_BOT_ID
         },
         {
-            type = 'input', label = '1. Ugrak Noktasi',
-            description = '"x,y,z" veya "x y z" VEYA Trap House ID',
-            required = true, max = MAX_WAYPOINT_LEN
+            type = 'input', label = '1. Ugrak Noktasi (opsiyonel)',
+            description = '"x,y,z" veya "x y z" VEYA Trap House ID — BOS BIRAKILABILIR',
+            required = false, max = MAX_WAYPOINT_LEN
         },
         {
-            type = 'input', label = '2. Ugrak Noktasi',
-            description = '"x,y,z" veya "x y z" VEYA Trap House ID',
-            required = true, max = MAX_WAYPOINT_LEN
+            type = 'input', label = '2. Ugrak Noktasi (opsiyonel)',
+            description = '"x,y,z" veya "x y z" VEYA Trap House ID — BOS BIRAKILABILIR',
+            required = false, max = MAX_WAYPOINT_LEN
         },
         {
-            type = 'input', label = '3. Ugrak Noktasi',
-            description = '"x,y,z" veya "x y z" VEYA Trap House ID',
-            required = true, max = MAX_WAYPOINT_LEN
+            type = 'input', label = '3. Ugrak Noktasi (opsiyonel)',
+            description = '"x,y,z" veya "x y z" VEYA Trap House ID — BOS BIRAKILABILIR',
+            required = false, max = MAX_WAYPOINT_LEN
         },
         {
-            type = 'input', label = 'Final Hedef (Ana Us)',
+            type = 'input', label = 'Final Hedef (Ana Us) — ZORUNLU',
             description = '"x,y,z" veya "x y z" VEYA Trap House ID',
             required = true, max = MAX_WAYPOINT_LEN
         },
@@ -385,14 +403,23 @@ local function OpenRotaCizDialog()
     local botId = SanitizeNumericArg(input[1], 1, MAX_BOT_ID)
     if not botId then NotifyInvalidInput('Bot ID gecersiz.'); return end
 
-    local waypoints = {}
-    for i = 2, 5 do
-        local wp = SanitizeWaypointArg(input[i])
+    -- ★ [E3] Ara uğraklar (1-3): boş bırakma GEÇERLİDİR (atlanır); DOLU
+    -- olup da karakter kümesini ihlal eden bir girdi yine REDDEDİLİR.
+    local waypointArgs = {}
+    for i = 2, 4 do
+        local wp = SanitizeOptionalWaypointArg(input[i])
         if not wp then
-            NotifyInvalidInput(('Uğrak/Hedef #%d geçersiz (yalnızca rakam, ".", ",", "-", bosluk).'):format(i - 1))
+            NotifyInvalidInput(('Uğrak #%d geçersiz (boş bırakabilirsiniz; doluysa yalnızca rakam, ".", ",", "-", boşluk).'):format(i - 1))
             return
         end
-        waypoints[#waypoints + 1] = wp
+        waypointArgs[#waypointArgs + 1] = wp
+    end
+
+    -- Final hedef HALA ZORUNLU — boş bırakılamaz.
+    local finalWp = SanitizeWaypointArg(input[5])
+    if not finalWp then
+        NotifyInvalidInput('Final Hedef geçersiz veya boş bırakılamaz (yalnızca rakam, ".", ",", "-", boşluk).')
+        return
     end
 
     local plate = SanitizePlateArg(input[6])
@@ -405,11 +432,43 @@ local function OpenRotaCizDialog()
     if not vehicleType then NotifyInvalidInput('Arac tipi gecersiz.'); return end
 
     ExecuteCommand(('rotaciz %s %s %s %s %s %s %s'):format(
-        botId, waypoints[1], waypoints[2], waypoints[3], waypoints[4], plate, vehicleType))
+        botId, waypointArgs[1], waypointArgs[2], waypointArgs[3], finalWp, plate, vehicleType))
 end
 
 local function OpenMatrixDump()
     ExecuteCommand('matrixdump')
+end
+
+--- ★ KATMAN 5 EK EMİR: "Canlı Kadro & Hiyerarşi Raporu".
+--- Sunucudan lib.callback ile TEK SEFERLİK (menü açıldığı an) telemetri
+--- çeker — sürekli bir polling thread'i YOKTUR, bu yüzden 0 Resmon bütçesi
+--- HUD kapalıyken de açıkken de bozulmaz: rapor yalnızca oyuncu bu menüyü
+--- AÇTIĞINDA hesaplanır, saf istek/cevap (callback) yapısıyla.
+local function OpenCanliKadroRaporu()
+    local lines = lib.callback.await('matrix:callback:getRosterReport', false)
+    if type(lines) ~= 'table' or #lines == 0 then
+        if lib and lib.notify then
+            lib.notify({
+                title       = '[KADRO RAPORU]',
+                description = 'Aktif unsur bulunamadi (bot veya oyuncu yok).',
+                type        = 'inform'
+            })
+        end
+        return
+    end
+
+    local options = {}
+    for i = 1, #lines do
+        options[i] = { title = lines[i], disabled = true, icon = 'circle-dot' }
+    end
+
+    lib.registerContext({
+        id    = 'matrix_roster_report',
+        title = '=== CANLI KADRO & HIYERARSI RAPORU ===',
+        menu  = 'matrix_tactical_menu',
+        options = options
+    })
+    lib.showContext('matrix_roster_report')
 end
 
 local function OpenTacticalMenu()
@@ -417,6 +476,12 @@ local function OpenTacticalMenu()
         id = 'matrix_tactical_menu',
         title = '=== TAKTIK KOMUTA MENUSU ===',
         options = {
+            {
+                title       = 'Canlı Kadro & Hiyerarşi Raporu',
+                description = 'Tum aktif bot ve oyuncu unsurlarini anlik olarak listele',
+                icon        = 'users-gear',
+                onSelect    = OpenCanliKadroRaporu
+            },
             {
                 title       = '/sevket',
                 description = 'Dealer botunu fiziksel sevke al (rutbe yetkisi gerekir)',

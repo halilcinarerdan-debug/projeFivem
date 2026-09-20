@@ -102,6 +102,8 @@ Matrix.Inventory   = Matrix.Inventory   or {}
 Matrix.PlayerSourceIndex = Matrix.PlayerSourceIndex or {}
 Matrix.NextBotId = Matrix.NextBotId or 1
 Matrix.Dispatches = Matrix.Dispatches or {}
+-- citizenid -> rank key ('Leader'|'Logistics_Officer'|'Chemist'), bkz. [E4]/[/rutbeata].
+Matrix.PlayerRanks = Matrix.PlayerRanks or {}
 
 Matrix.QBX = exports.qbx_core
 
@@ -884,7 +886,10 @@ function Matrix.BeginRouteDispatch(botId, origin, waypointRefs, finalRef, plate,
     if bot.state.is_locked then return false, 'bot_locked' end
     if Matrix.Dispatches[botId] then return false, 'already_dispatched' end
     if type(origin) ~= 'vector3' and type(origin) ~= 'vector4' then return false, 'bad_origin' end
-    if type(waypointRefs) ~= 'table' or #waypointRefs == 0 then return false, 'bad_waypoints' end
+    -- ★ [E3] DİNAMİK WAYPOINT ESNEKLİĞİ: 0 ara uğrak da GEÇERLİDİR (bu durumda
+    -- rota zinciri yalnızca finalRef'ten ibarettir — düz bir sevkle özdeştir).
+    -- Zorunlu olan TEK şey finalRef'in geçerli bir vector olmasıdır.
+    if type(waypointRefs) ~= 'table' then return false, 'bad_waypoints' end
     if type(finalRef) ~= 'vector3' and type(finalRef) ~= 'vector4' then return false, 'bad_destination' end
 
     -- ★ HATA DÜZELTMESİ: vector4 (heading taşıyan origin) ile vector3
@@ -1343,6 +1348,58 @@ function Matrix.Hud.PushSnapshots()
 end
 
 -- =====================================================================
+-- ★ [E4] KATMAN 5 EK EMİR: CANLI KADRO & HİYERARŞİ RAPORU
+-- F10 menüsünün en tepesindeki "Canlı Kadro & Hiyerarşi Raporu" alt
+-- menüsü açıldığı AN bu callback'i çağırır (client: lib.callback.await).
+-- Sürekli bir polling/thread YOKTUR — yalnızca istek anında hesaplanan
+-- SAF bir istek/cevap (callback) yapısı; 0 Resmon bütçesi HUD'dan
+-- bağımsız olarak korunur.
+-- =====================================================================
+local ROSTER_REPORT_MAX_LINES = 100 -- RAM-bomb / menü-taşması savunması
+
+local ROSTER_AUTHORITY_LABELS = {
+    Leader            = 'MUTLAK',
+    Logistics_Officer = 'YETKILI',
+    Chemist           = 'KISITLI'
+}
+
+lib.callback.register('matrix:callback:getRosterReport', function(src)
+    local lines = {}
+
+    for id, bot in pairs(Matrix.Bots) do
+        if #lines >= ROSTER_REPORT_MAX_LINES then break end
+        if bot.status == 'active' then
+            local durum = bot.state.is_locked and 'MESGUL / INTIKALDE' or 'STABIL / BEKLEMEDE'
+            lines[#lines + 1] = ('[ID: %d] - %s | Rol: STREET DEALER | Durum: %s'):format(id, bot.name, durum)
+        end
+    end
+
+    local ok, players = pcall(function() return Matrix.QBX:GetQBPlayers() end)
+    if ok and type(players) == 'table' then
+        for playerSrc, player in pairs(players) do
+            if #lines >= ROSTER_REPORT_MAX_LINES then break end
+            if player and player.PlayerData then
+                local citizenid = player.PlayerData.citizenid
+                local rank      = citizenid and Matrix.PlayerRanks[citizenid]
+                local rankDef   = rank and Config.Hierarchy.Ranks[rank]
+                local rankLabel = rankDef and rankDef.label or 'Rutbesiz'
+                local yetki     = (rank and ROSTER_AUTHORITY_LABELS[rank]) or 'KISITLI'
+
+                local charinfo = player.PlayerData.charinfo
+                local name = (charinfo and charinfo.firstname and charinfo.lastname)
+                    and ('%s %s'):format(charinfo.firstname, charinfo.lastname)
+                    or ('Oyuncu-%d'):format(playerSrc)
+
+                lines[#lines + 1] = ('[ID: %d] - %s | Rutbe: %s | Yetki: %s'):format(
+                    playerSrc, name, rankLabel, yetki)
+            end
+        end
+    end
+
+    return lines
+end)
+
+-- =====================================================================
 -- MASTER TICKER
 -- =====================================================================
 local bureauAccumulator = 0
@@ -1567,18 +1624,26 @@ end
 RegisterCommand('rotaciz', function(src, args)
     local botId = tonumber(args[1])
     if not botId or not Matrix.Bots[botId] then
-        Reply(src, 'Kullanim: /rotaciz [botId] [wp1] [wp2] [wp3] [finalHedef] [plaka] [aracTipi]')
+        Reply(src, 'Kullanim: /rotaciz [botId] [wp1|nil] [wp2|nil] [wp3|nil] [finalHedef] [plaka] [aracTipi] (wp1-3 bos/"nil" olabilir)')
         return
     end
 
+    -- ★ [E3] DİNAMİK WAYPOINT ESNEKLİĞİ: boş bırakılan ('nil' placeholder'ı
+    -- veya boş string) ara uğrak argümanları BURADA — senkron, saf bir
+    -- filtre olarak (ek thread/coroutine YOK, 0 Resmon korunur) — rota
+    -- zincirinden drop edilir. Yalnızca DOLU ve GEÇERLİ olanlar sıralı
+    -- (boşluksuz) bir diziye toplanıp BeginRouteDispatch'e iletilir.
     local waypoints = {}
     for i, rawIdx in ipairs({ 2, 3, 4 }) do
-        local coords, err = ResolveWaypointRef(args[rawIdx])
-        if not coords then
-            Reply(src, ('Ugrak #%d cozumlenemedi: %s'):format(i, tostring(err)))
-            return
+        local raw = args[rawIdx]
+        if raw ~= nil and raw ~= '' and raw ~= 'nil' then
+            local coords, err = ResolveWaypointRef(raw)
+            if not coords then
+                Reply(src, ('Ugrak #%d cozumlenemedi: %s'):format(i, tostring(err)))
+                return
+            end
+            waypoints[#waypoints + 1] = coords
         end
-        waypoints[i] = coords
     end
 
     local finalCoords, finalErr = ResolveWaypointRef(args[5])
@@ -1610,6 +1675,33 @@ RegisterCommand('rotaciz', function(src, args)
     else
         Reply(src, ('Rota baslatilamadi: %s'):format(tostring(err)))
     end
+end, false)
+
+-- =====================================================================
+-- ★ [E4] /rutbeata — HİYERARŞİ RÜTBE ATAMASI
+-- F10 menüsündeki OpenRutbeAtaDialog zaten bu komutu ExecuteCommand ile
+-- tetikliyordu; sunucu tarafı karşılığı burada. Atanan rütbe
+-- Matrix.PlayerRanks[citizenid]'e yazılır — "Canlı Kadro & Hiyerarşi
+-- Raporu" (matrix:callback:getRosterReport) buradan okur.
+-- =====================================================================
+RegisterCommand('rutbeata', function(src, args)
+    local targetSrc = tonumber(args[1])
+    local rank      = args[2]
+    if not targetSrc or not Config.Hierarchy.Ranks[rank] then
+        Reply(src, 'Kullanim: /rutbeata [hedefServerId] [Leader|Logistics_Officer|Chemist]')
+        return
+    end
+
+    local targetState = Matrix.GetOrCreatePlayerState(targetSrc)
+    if not targetState then
+        Reply(src, 'Hedef oyuncu profili cozulemedi.')
+        return
+    end
+
+    Matrix.PlayerRanks[targetState.citizenid] = rank
+    local rankLabel = Config.Hierarchy.Ranks[rank].label
+    Reply(src, ('Hedef #%d rutbesi %s (%s) olarak atandi.'):format(targetSrc, rank, rankLabel))
+    Reply(targetSrc, ('Yeni rutbeniz: %s (%s)'):format(rank, rankLabel))
 end, false)
 
 RegisterCommand('balistiktest', function(src, args)
