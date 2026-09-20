@@ -523,6 +523,13 @@ Config.TrapHouseInterior = {
     EntryRadius       = 1.5,
     ExitRadius        = 1.5,
 
+    -- ★ TEŞHİS DÜZELTMESİ: giriş mesafesi yatay (X,Y) ve dikey (Z) olarak
+    -- AYRI ölçülür (bkz. server/trap_house_interior.lua HorizontalDistance).
+    -- Trap house koordinatı yer seviyesinde kaydedilmiş olsa bile oyuncu
+    -- bir kaldırım/basamak/eşikte durunca Z birkaç metre kayabilir; dikeyde
+    -- bu yüzden çok daha toleranslı bir sınır kullanılır.
+    EntryZTolerance   = 8.0,
+
     -- Vanilla döküntü iç mekan kabuğu (Trevor'ın treyleri) — tüm trap
     -- house'lar AYNI fiziksel koordinatları paylaşır; routing bucket
     -- birbirlerini görmelerini/etkilemelerini engeller.

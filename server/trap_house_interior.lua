@@ -56,9 +56,16 @@ local function Reply(src, msg)
     end
 end
 
-local function VectorDistance(a, b)
+--- ★ TEŞHİS: giriş mesafesi eskiden TEK bir 3D uzaklıkla (X,Y,Z birlikte)
+--- ölçülüyordu. Trap house koordinatı /coords ile yer seviyesinde
+--- kaydedilmiş olsa bile oyuncu bir kaldırım/basamak/eşikte durduğunda Z
+--- birkaç metre farklı olabilir — bu da "haritada tam üzerindeyim" derken
+--- 3D mesafenin eşiği aşıp SESSİZCE reddedilmesine yol açar. Yatay (X,Y)
+--- ve dikey (Z) mesafe artık AYRI ölçülür; dikeyde çok daha toleranslıdır.
+local function HorizontalDistance(a, b)
     if not a or not b then return math_huge end
-    return #(a - b)
+    local dx, dy = (a.x - b.x), (a.y - b.y)
+    return math.sqrt((dx * dx) + (dy * dy))
 end
 
 -- src -> trapHouseId (oyuncu şu an hangi trap house instance'ının içinde)
@@ -109,8 +116,17 @@ RegisterNetEvent('matrix:server:trapHouseInterior:enter', function(trapHouseId)
     local ped = GetPlayerPed(src)
     if not ped or ped == 0 then return end
     local coords = GetEntityCoords(ped)
-    if VectorDistance(coords, house.coords) > ((Config.TrapHouseInterior.EntryRadius or 1.5) + 3.0) then
+
+    local horizDist   = HorizontalDistance(coords, house.coords)
+    local vertDist    = math.abs(coords.z - house.coords.z)
+    local horizRadius = (Config.TrapHouseInterior.EntryRadius or 1.5) + 3.0
+    local vertRadius  = Config.TrapHouseInterior.EntryZTolerance or 8.0
+
+    if horizDist > horizRadius or vertDist > vertRadius then
         Reply(src, 'Kapıya yeterince yakın değilsiniz.')
+        Matrix.Log('TRAPHOUSE',
+            '[GIRIS RED] src=%d trap=%d -> mesafe yetersiz (yatay:%.1fm/limit:%.1fm, dikey:%.1fm/limit:%.1fm)',
+            src, trapHouseId, horizDist, horizRadius, vertDist, vertRadius)
         return
     end
 
