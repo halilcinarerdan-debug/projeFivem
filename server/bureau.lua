@@ -827,6 +827,17 @@ local function Reply(src, msg)
     end
 end
 
+-- /coords'un ikinci satırı ("vector3(x, y, z)") config dosyalarına
+-- yapıştırmak için virgüllüdür; oyuncular bunu (virgüllü haliyle) doğrudan
+-- komutlara da yapıştırabiliyor. FiveM komut argümanlarını yalnızca
+-- BOŞLUKTAN ayırdığı için "-1464.224," gibi trailing-comma'lı bir token
+-- tonumber() ile hiç parse edilemez. Bu yüzden koordinat argümanlarındaki
+-- virgüller tonumber'dan ÖNCE temizlenir (boşlukla ayrılmış doğru format
+-- hâlâ çalışmaya devam eder — bu salt bir tolerans katmanıdır).
+local function ParseCoordNumber(s)
+    return tonumber((tostring(s or ''):gsub(',', '')))
+end
+
 -- ★ pcall'lı: MySQL.insert (veya IsValidCoords dışında herhangi bir şey)
 -- beklenmedik şekilde hata verirse artık SESSİZCE yutulmuyor — chat'e
 -- açık bir hata mesajı basılır VE server konsoluna loglanır. Önceki hâl
@@ -835,9 +846,9 @@ end
 -- durdurup oyuncuya HİÇBİR mesaj göstermeyebiliyordu.
 RegisterCommand('traphouseekle', function(src, args)
     local label = args[1]
-    local x, y, z = tonumber(args[2]), tonumber(args[3]), tonumber(args[4])
+    local x, y, z = ParseCoordNumber(args[2]), ParseCoordNumber(args[3]), ParseCoordNumber(args[4])
     if not x or not y or not z then
-        Reply(src, 'Kullanim: /traphouseekle [label] [x] [y] [z]'); return
+        Reply(src, 'Kullanim: /traphouseekle [label] [x] [y] [z]  (boslukla ayirin, virgul KULLANMAYIN)'); return
     end
 
     local ok, errOrResult = pcall(Matrix.Bureau.CreateTrapHouse, label, vector3(x, y, z))

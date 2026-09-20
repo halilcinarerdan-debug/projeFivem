@@ -1427,10 +1427,17 @@ RegisterCommand('dropdurum', function(src)
     Reply(src, ('--- Toplam %d acik drop ---'):format(count))
 end, false)
 
+-- /coords'un virgullu "vector3(x, y, z)" satirindan kopyala-yapistir
+-- yapilirsa trailing comma tonumber()'i bozar; bkz. bureau.lua ParseCoordNumber
+-- ile AYNI tolerans (komutlar boslukla ayrilir, ama virguller sessizce temizlenir).
+local function ParseCoordNumber(s)
+    return tonumber((tostring(s or ''):gsub(',', '')))
+end
+
 RegisterCommand('korbolgetest', function(src, args)
-    local x, y, z = tonumber(args[1]), tonumber(args[2]), tonumber(args[3])
+    local x, y, z = ParseCoordNumber(args[1]), ParseCoordNumber(args[2]), ParseCoordNumber(args[3])
     if not x or not y or not z then
-        Reply(src, 'Kullanim: /korbolgetest [x] [y] [z]'); return
+        Reply(src, 'Kullanim: /korbolgetest [x] [y] [z]  (boslukla ayirin, virgul KULLANMAYIN)'); return
     end
 
     local zone = FindDeadZone(vector3(x, y, z))

@@ -1264,8 +1264,14 @@ RegisterCommand('coords', function(src)
     if not ped or ped == 0 then Reply(src, 'Ped bulunamadi.'); return end
     local c  = GetEntityCoords(ped)
     local hd = GetEntityHeading(ped)
-    Reply(src, ('X:%.3f Y:%.3f Z:%.3f Heading:%.1f'):format(c.x, c.y, c.z, hd))
-    Reply(src, ('vector3(%.3f, %.3f, %.3f)'):format(c.x, c.y, c.z))
+    -- ★ İKİ FORMAT, İKİ AMAÇ — birbirine KARIŞTIRILMAMALI:
+    --   (1) KOMUTLAR için (örn. /traphouseekle, /korbolgetest): boşlukla
+    --       ayrılmış, VİRGÜLSÜZ. FiveM komut argümanları sadece boşluktan
+    --       böler; virgüllü bir sayı tonumber() ile parse edilemez.
+    --   (2) CONFIG DOSYALARI için (shared/config.lua içine Lua kodu olarak
+    --       yapıştırılacak): virgüllü "vector3(x, y, z)" Lua sözdizimi.
+    Reply(src, ('KOMUTLAR ICIN (boslukla): %.3f %.3f %.3f  |Heading:%.1f'):format(c.x, c.y, c.z, hd))
+    Reply(src, ('CONFIG ICIN (virgullu):  vector3(%.3f, %.3f, %.3f)'):format(c.x, c.y, c.z))
 end, false)
 
 RegisterCommand('botyarat', function(src, args)
