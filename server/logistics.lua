@@ -1035,21 +1035,28 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatc
     local weightTotal = GetBotInventoryWeight(bot)
     local baseSpeed   = Config.Logistics.BaseSpeedUnitsPerSecond
 
-    local etaSeconds = (distance / (baseSpeed * profile.SpeedCoefficient))
-        * (1.0 + (weightTotal * Config.Logistics.WeightFrictionCoefficient) * effectiveFriction)
+    -- ★ KATMAN 5: frictionDivisor >= 1.0 HER ZAMAN (ağırlık/aşınma/araç tipi
+    -- SADECE yavaşlatır, asla hızlandırmaz) — ETA formülünden AYNEN çıkarıldı,
+    -- değişen bir şey yok. Artık main.lua'ya da geçiriliyor ki GERÇEK sürüş
+    -- hızı (TaskVehicleDriveToCoord/TaskGoStraightToCoord) da AYNI oranda
+    -- yavaşlasın; önceden bu sadece aşağıdaki ETA metnini etkiliyordu, gerçek
+    -- sürüş hep sabit hızda gidiyordu ("kozmetik sürtünme").
+    local frictionDivisor = 1.0 + (weightTotal * Config.Logistics.WeightFrictionCoefficient * effectiveFriction)
+
+    local etaSeconds = (distance / (baseSpeed * profile.SpeedCoefficient)) * frictionDivisor
     etaSeconds = Matrix.Clamp(etaSeconds, 0.0, math_huge)
 
     Matrix.Log('LOGISTICS',
-        'Sevkiyat plani: Bot #%d [%s]%s Mesafe:%.1fm Agirlik:%.1fg ETA:%.1fsn',
+        'Sevkiyat plani: Bot #%d [%s]%s Mesafe:%.1fm Agirlik:%.1fg Surtunme:x%.2f ETA:%.1fsn',
         botId, bot.name,
         plate and (' Plaka:%s VIN:%s Asinma:%.2f'):format(plate, vehicle.vin_status, vehicle.vehicle_wear)
               or (' Arac:%s'):format(vehicleType),
-        distance, weightTotal, etaSeconds)
+        distance, weightTotal, frictionDivisor, etaSeconds)
 
     -- ★ FİZİKSEL YÜRÜTMEYİ MAIN.LUA'YA DEVRET
     if Matrix.BeginPhysicalDispatch then
         local ok, reason = Matrix.BeginPhysicalDispatch(
-            botId, origin, destination, plate, vehicleType, etaSeconds, dispatcherSrc
+            botId, origin, destination, plate, vehicleType, etaSeconds, dispatcherSrc, frictionDivisor
         )
         if not ok then
             -- Kilidi geri al (başlatma başarısız oldu).

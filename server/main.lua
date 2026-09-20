@@ -616,6 +616,24 @@ local DISPATCH_BUSTED_DWELL_TICKS     = 8      -- 8 sn boyunca polis dibinde kal
 local DISPATCH_ALPR_RADIUS_M          = 250.0  -- ALPR/trap house gözlem menzili
 local DISPATCH_TASK_REISSUE_TICKS     = 25     -- 25 sn'de bir rota yeniden atanır (AI takılma önleyici)
 
+-- ★ KATMAN 5: Zaman-Mesafe Sürtünme Denklemi'nin GERÇEK sürüş hızına bağlanması.
+-- Eskiden TaskVehicleDriveToCoord/TaskGoStraightToCoord'a SABİT KODLANMIŞ
+-- 15.0 / 1.4 m/s veriliyordu; logistics.lua'nın hesapladığı frictionDivisor
+-- (ağırlık × WeightFrictionCoefficient × araç-tipi-sürtünmesi × aşınma)
+-- yalnızca chat'e basılan ETA metnini etkiliyordu, gerçek sürüş HİÇ
+-- yavaşlamıyordu ("kozmetik sürtünme"). Artık BeginPhysicalDispatch bu
+-- taban hızları frictionDivisor'e böler — aynı katsayı hem tahminde hem
+-- gerçek simülasyonda kullanılır. Taban hızların KENDİSİ değişmedi (boş
+-- envanter + sıfır aşınmış araçta davranış eskisiyle BİREBİR AYNI, çünkü
+-- frictionDivisor=1.0 durumunda bölme etkisizdir); yalnızca YÜK/AŞINMA
+-- ARTIK gerçekten yavaşlatıyor.
+local DISPATCH_BASE_FOOT_SPEED_MS     = 1.4
+local DISPATCH_BASE_VEHICLE_SPEED_MS  = 15.0
+-- frictionDivisor ne kadar büyürse büyüsün hız bu oranın (taban hızın
+-- %25'i) altına düşmez — aşırı yük/aşınma botu sonsuza kadar süründürmez,
+-- sadece belirgin şekilde yavaşlatır.
+local DISPATCH_MIN_SPEED_FRACTION     = 0.25
+
 -- Polis oyuncuları cache'i. Her master tick'te QB job sorgusu yapmak yerine
 -- 5 sn'de bir yeniden inşa edilir → 0 Resmon hedefiyle uyumlu.
 -- ★ Qbox: exports.qbx_core:GetQBPlayers() zaten <source, Player> tablosu
@@ -707,9 +725,14 @@ end
 --- Fiziksel sevki başlatır. Pedi/aracı ORIGIN'de gerçekten yaratır,
 --- OneSync routing görevini atar, Matrix.Dispatches tablosuna kaydeder.
 --- @return boolean, string|nil reason
-function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicleType, etaSeconds, dispatcherSrc)
+function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicleType, etaSeconds, dispatcherSrc, frictionDivisor)
     botId = tonumber(botId)
     if not botId then return false, 'bad_bot_id' end
+
+    -- ★ frictionDivisor >= 1.0 (logistics.lua'nın ETA formülüyle AYNI değer);
+    -- verilmezse (örn. export'u doğrudan çağıran eski bir kod yolu) 1.0
+    -- varsayılır -> taban hızlar DEĞİŞMEZ, geriye dönük tam uyumlu.
+    frictionDivisor = Matrix.Clamp(tonumber(frictionDivisor) or 1.0, 1.0, 1.0 / DISPATCH_MIN_SPEED_FRACTION)
 
     local bot = Matrix.Bots[botId]
     if not bot then return false, 'bot_missing' end
@@ -741,6 +764,14 @@ function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicle
     local ped, vehicle
     local vehicleNetId = nil
 
+    -- ★ Gerçek sürüş hızı = taban hız / frictionDivisor (taban hızın
+    -- DISPATCH_MIN_SPEED_FRACTION'ının altına asla düşmez). frictionDivisor=1.0
+    -- iken (boş envanter, sıfır aşınmış/foot) sonuç TAM olarak eski sabit
+    -- değerdir (1.4 / 15.0) — davranış değişikliği yalnızca yük/aşınma
+    -- gerçekten mevcutken ortaya çıkar.
+    local baseSpeed   = isFoot and DISPATCH_BASE_FOOT_SPEED_MS or DISPATCH_BASE_VEHICLE_SPEED_MS
+    local cruiseSpeed = math_max(baseSpeed / frictionDivisor, baseSpeed * DISPATCH_MIN_SPEED_FRACTION)
+
     if isFoot then
         ped = CreatePed(4, pedHash, origin.x, origin.y, origin.z, 0.0, true, false)
         if not AwaitEntityCreation(ped) then return false, 'ped_spawn_timeout' end
@@ -748,11 +779,11 @@ function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicle
         SetEntityCoords(ped, origin.x, origin.y, origin.z, false, false, false, false)
 
         -- Server-side routing: yürüme görevi. (OneSync uyumlu.)
-        -- Hız 1.4 m/s (normal yürüyüş), timeout=-1 (süresiz).
+        -- Hız = cruiseSpeed (taban 1.4 m/s, sürtünmeyle yavaşlar), timeout=-1 (süresiz).
         TaskGoStraightToCoord(
             ped,
             destination.x, destination.y, destination.z,
-            1.4,   -- speed
+            cruiseSpeed, -- speed
             -1,    -- timeout
             0.0,   -- targetHeading
             0.5    -- distanceToSlide
@@ -780,7 +811,7 @@ function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicle
             ped,
             vehicle,
             destination.x, destination.y, destination.z,
-            15.0,     -- cruise speed m/s
+            cruiseSpeed, -- cruise speed m/s (taban 15.0, sürtünmeyle yavaşlar)
             0,        -- vehicleModel (0 = mevcut)
             vehHash,  -- drivingStyle model argümanı
             16777216, -- drivingStyle bitmask
@@ -806,6 +837,7 @@ function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicle
         origin            = origin,
         destination       = destination,
         eta_estimate      = etaSeconds or 0.0,
+        cruise_speed      = cruiseSpeed,
         elapsed           = 0.0,
         last_coords       = origin,
         weight_total      = LocalGetBotInventoryWeight(bot),
@@ -1060,20 +1092,24 @@ function Matrix.TickPhysicalDispatches()
                         -- ============================================
                         if dispatch.task_retry_ticks >= DISPATCH_TASK_REISSUE_TICKS then
                             dispatch.task_retry_ticks = 0
+                            -- ★ Yeniden atanan görev de dispatch.cruise_speed'i kullanır
+                            -- (sürtünme yavaşlaması yolun ortasında sıfırlanmasın diye —
+                            -- eskiden burası da sabit 15.0/1.4'e dönüyordu).
+                            local reissueSpeed = dispatch.cruise_speed or DISPATCH_BASE_VEHICLE_SPEED_MS
                             if dispatch.vehicle_net_id then
                                 local veh = NetworkGetEntityFromNetworkId(dispatch.vehicle_net_id)
                                 if veh and veh ~= 0 and DoesEntityExist(veh) then
                                     TaskVehicleDriveToCoord(
                                         ped, veh,
                                         dispatch.destination.x, dispatch.destination.y, dispatch.destination.z,
-                                        15.0, 0, 0, 16777216, 5.0, 1
+                                        reissueSpeed, 0, 0, 16777216, 5.0, 1
                                     )
                                 end
                             else
                                 TaskGoStraightToCoord(
                                     ped,
                                     dispatch.destination.x, dispatch.destination.y, dispatch.destination.z,
-                                    1.4, -1, 0.0, 0.5
+                                    reissueSpeed, -1, 0.0, 0.5
                                 )
                             end
                         end
@@ -1373,8 +1409,8 @@ exports('RemoveBot',   function(id, r) return Matrix.RemoveBot(id, r) end)
 exports('GetBot',      function(id) return Matrix.GetBot(id) end)
 
 -- ★ Fiziksel sevk dışa açılımı (logistics.lua DispatchDealer buradan çağırır)
-exports('BeginPhysicalDispatch', function(botId, origin, destination, plate, vehicleType, eta, src)
-    return Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicleType, eta, src)
+exports('BeginPhysicalDispatch', function(botId, origin, destination, plate, vehicleType, eta, src, frictionDivisor)
+    return Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicleType, eta, src, frictionDivisor)
 end)
 exports('CompleteDispatch', function(botId, reason)
     return Matrix.CompleteDispatch(botId, reason)
@@ -1475,10 +1511,11 @@ RegisterCommand('fizikselsevk', function(src, args)
     for botId, d in pairs(Matrix.Dispatches) do
         count = count + 1
         local lc = d.last_coords or d.origin
-        Reply(src, ('Bot #%d [%s] Plaka:%s Konum:(%.1f,%.1f,%.1f) Hedef-Mesafe:%.1fm Sinyal:%s Polis-Dwell:%d Bekleyen:%d'):format(
+        Reply(src, ('Bot #%d [%s] Plaka:%s Konum:(%.1f,%.1f,%.1f) Hedef-Mesafe:%.1fm Hiz:%.2fm/s Sinyal:%s Polis-Dwell:%d Bekleyen:%d'):format(
             botId, d.vehicle_type, tostring(d.plate),
             lc.x, lc.y, lc.z,
             #(lc - d.destination),
+            d.cruise_speed or 0.0,
             d.comms_lost and 'KESİK' or 'VAR',
             d.police_dwell,
             #d.pending_events))
