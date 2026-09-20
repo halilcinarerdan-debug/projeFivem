@@ -523,4 +523,20 @@ RegisterCommand('traphouseipldebug', function()
     local myCoords = GetEntityCoords(ped)
     local myInteriorEntity = GetInteriorFromEntity(ped)
     print(('[TRAPHOUSE_IPL_DEBUG] oyuncu konumu=%.4f,%.4f,%.4f  GetInteriorFromEntity(ped)=%s'):format(myCoords.x, myCoords.y, myCoords.z, tostring(myInteriorEntity)))
+
+    -- ★ "E tusu gitti" teshisi: insideTrapHouse/shellData durumu ve exit/
+    -- workbench/packaging'e olan CANLI mesafeler (INTERACT_RADIUS=2.0 ile
+    -- kiyaslamak icin).
+    print(('[TRAPHOUSE_IPL_DEBUG] insideTrapHouse=%s shellData=%s'):format(tostring(insideTrapHouse), tostring(shellData ~= nil)))
+    if shellData then
+        if shellData.exit_coords then
+            print(('[TRAPHOUSE_IPL_DEBUG] exit_coords mesafe=%.4f (INTERACT_RADIUS=%.1f)'):format(VDist(myCoords, shellData.exit_coords), INTERACT_RADIUS))
+        end
+        if shellData.workbench_pos then
+            print(('[TRAPHOUSE_IPL_DEBUG] workbench_pos mesafe=%.4f'):format(VDist(myCoords, shellData.workbench_pos)))
+        end
+        if shellData.packaging_pos then
+            print(('[TRAPHOUSE_IPL_DEBUG] packaging_pos mesafe=%.4f'):format(VDist(myCoords, shellData.packaging_pos)))
+        end
+    end
 end, false)
