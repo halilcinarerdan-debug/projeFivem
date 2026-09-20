@@ -547,27 +547,26 @@ Config.TrapHouseInterior = {
     -- interior'larının paylaştığı ayrı/yeraltı "interior cebi" konumudur
     -- (normal harita ile çakışmaz).
     --
-    -- ★ DÜZELTME (canlı testte bulundu): Workbench/Packaging ilk başta
-    -- kapıya yalnızca 1-2m uzaktaydı — client/trap_house_client.lua'nın
-    -- INTERACT_RADIUS'u (2.0m) bu üç noktanın etkileşim alanlarını
-    -- ÇAKIŞTIRIYORDU: tezgaha basmak için E'ye basınca oyuncu AYNI ANDA
-    -- çıkış tetiğinin de menzilindeydi, tek bir IsControlJustPressed o
-    -- tick'teki HER `if` bloğunda true okunduğundan hem tamir hem çıkış
-    -- birlikte tetikleniyor, oyuncu dışarı fırlıyordu. Artık Workbench/
-    -- Packaging kapıdan 5m (2×INTERACT_RADIUS'un üzerinde, güvenli pay ile)
-    -- uzağa, birbirinden de yaklaşık 7m uzağa yerleştirildi. Kesin oda
-    -- şekli/duvarlar bilinmediğinden hâlâ TAHMİNİDİR — oyunda içeri girip
-    -- gözlemledikten sonra bu noktalar ve EnterCoords.w (heading) rahatça
-    -- ince ayarlanabilir (yalnızca sayı değişikliği, kod değişikliği
-    -- gerekmez), yalnızca ARALARINDAKİ mesafeyi 2×INTERACT_RADIUS'un altına
-    -- düşürmemeye dikkat edin. İnteriorun render OLMAMASI durumunda client/
+    -- ★ DÜZELTME (canlı testte bulundu, KALICI kök-neden çözümü uygulandı):
+    -- Workbench/Packaging kapıya çok yakın olunca (INTERACT_RADIUS=2.0
+    -- içinde çakışınca) tezgaha basmak için E'ye basıldığında oyuncu AYNI
+    -- ANDA çıkış tetiğinin de menzilindeydi ve hem tamir hem çıkış birlikte
+    -- tetikleniyordu, oyuncu dışarı fırlıyordu. Asıl düzeltme client/
+    -- trap_house_client.lua'nın etkileşim döngüsünde: artık exit/workbench/
+    -- packaging bağımsız üç `if` değil, "en yakın TEK bölge" seçiliyor —
+    -- noktalar ne kadar yakın olursa olsun çift tetikleme artık YAPISAL
+    -- olarak imkansız. Bu yüzden koordinatlar arasındaki mesafe artık bir
+    -- doğruluk sorunu değil, yalnızca kozmetik bir tercih. WorkbenchPos,
+    -- kullanıcının oyun içinde bizzat durup "/coords" ile aldığı gerçek
+    -- konum (bkz. ekran görüntüsü) — EnterCoords/ExitCoords (kapı) kasıtlı
+    -- olarak DEĞİŞTİRİLMEDİ. İnteriorun render OLMAMASI durumunda client/
     -- trap_house_client.lua'daki "/traphouseipldebug" teşhis komutu
     -- IsIplActive/GetInteriorAtCoords/IsInteriorReady sonuçlarını F8
     -- konsoluna basar.
     Shell = {
         EnterCoords  = vector4(261.4586, -998.8196, -99.00863, 0.0),
-        WorkbenchPos = vector3(266.4586, -998.8196, -99.00863),
-        PackagingPos = vector3(261.4586, -993.8196, -99.00863),
+        WorkbenchPos = vector3(258.303, -997.279, -99.015),
+        PackagingPos = vector3(258.303, -994.279, -99.015),
         ExitCoords   = vector4(261.4586, -998.8196, -99.00863, 180.0)
     },
 

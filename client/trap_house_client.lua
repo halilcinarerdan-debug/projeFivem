@@ -29,11 +29,6 @@ local RESIDENT_BOT_PED_MODEL = 'g_m_y_famdnf_01'
 local sellerPeds  = {} -- handoffId -> { entity, coords, radius }
 local ambushPeds  = {}
 
--- ★ Tezgah kolizyonsuz görsel prop -- saf dekor, "burada bir tezgah var"
--- hissi için; oyuncu içinden yürüyüp geçebilir (kasıtlı, kullanıcı isteği).
-local WORKBENCH_PROP_MODEL = 'prop_tool_bench02'
-local workbenchProp = nil
-
 -- =====================================================================
 -- YARDIMCI ÇİZİM (monokrom, DrawText — client/hud.lua DrawMonoLine ile
 -- AYNI görsel dil, ayrı bir dosya olduğu için küçük bir yerel kopya).
@@ -250,27 +245,6 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
         end)
     end
 
-    -- ★ Tezgah prop'u: saf görsel dekor, kolizyonsuz (oyuncu isteği --
-    -- "prop koyar mısın kolizyonsuz workbench için"). SetEntityCollision
-    -- false yapınca yerçekimi hala etkiliyken çarpışma olmayacağından prop
-    -- yere düşer gibi davranabilir; FreezeEntityPosition ile sabitlenir.
-    if data.workbench_pos then
-        CreateThread(function()
-            local model = RequestModelSync(WORKBENCH_PROP_MODEL)
-            if not model then return end
-
-            local pos = data.workbench_pos
-            local obj = CreateObject(model, pos.x, pos.y, pos.z, false, false, false)
-            if obj and obj ~= 0 then
-                SetEntityCollision(obj, false, false)
-                FreezeEntityPosition(obj, true)
-                SetEntityAsMissionEntity(obj, true, true)
-                workbenchProp = obj
-            end
-            SetModelAsNoLongerNeeded(model)
-        end)
-    end
-
     if lib and lib.notify then
         lib.notify({ title = '[TRAP HOUSE]', description = 'Kapidan icerisi girildi. Cikmak icin kapiya donup [E] tuslayin.', type = 'inform' })
     end
@@ -285,16 +259,8 @@ local function CleanupResidentPeds()
     residentPeds = {}
 end
 
-local function CleanupWorkbenchProp()
-    if workbenchProp and DoesEntityExist(workbenchProp) then
-        pcall(DeleteEntity, workbenchProp)
-    end
-    workbenchProp = nil
-end
-
 RegisterNetEvent('matrix:client:trapHouseInterior:teleportOut', function(data)
     CleanupResidentPeds()
-    CleanupWorkbenchProp()
     insideTrapHouse = nil
     shellData        = nil
 
@@ -307,7 +273,6 @@ end)
 AddEventHandler('onClientResourceStop', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     CleanupResidentPeds()
-    CleanupWorkbenchProp()
 end)
 
 -- =====================================================================
@@ -325,14 +290,37 @@ CreateThread(function()
         if insideTrapHouse and shellData then
             sleep = 0
 
-            if shellData.exit_coords and VDist(coords, shellData.exit_coords) <= INTERACT_RADIUS then
+            -- ★ DÜZELTME (kalıcı kök-neden çözümü): eskiden exit/workbench/
+            -- packaging üç AYRI/BAĞIMSIZ `if` bloğuydu — noktalar birbirine
+            -- yakınsa (INTERACT_RADIUS=2.0 içinde çakışıyorsa) oyuncu AYNI
+            -- ANDA birden fazla bölgenin menzilinde olabiliyordu ve TEK bir
+            -- IsControlJustPressed okuması o tick'teki HER blokta true
+            -- geldiğinden E'ye basınca birden fazla aksiyon BİRLİKTE
+            -- tetikleniyordu (ör. tamir + çıkış aynı anda). Artık en yakın
+            -- TEK bölge seçilip yalnızca ONUN prompt'u/aksiyonu işleniyor —
+            -- noktalar ne kadar yakın olursa olsun (kullanıcı koordinatlarla
+            -- uğraşmak istemediği için) çift tetikleme YAPISAL olarak
+            -- imkansız hale getirildi.
+            local zone, zoneDist = nil, INTERACT_RADIUS
+            if shellData.exit_coords then
+                local d = VDist(coords, shellData.exit_coords)
+                if d <= zoneDist then zone, zoneDist = 'exit', d end
+            end
+            if shellData.workbench_pos then
+                local d = VDist(coords, shellData.workbench_pos)
+                if d <= zoneDist then zone, zoneDist = 'workbench', d end
+            end
+            if shellData.packaging_pos then
+                local d = VDist(coords, shellData.packaging_pos)
+                if d <= zoneDist then zone, zoneDist = 'packaging', d end
+            end
+
+            if zone == 'exit' then
                 DrawWorldPrompt(shellData.exit_coords, '[E] Disari Cik')
                 if IsControlJustPressed(0, 38) then -- INPUT_PICKUP / E
                     TriggerServerEvent('matrix:server:trapHouseInterior:exit')
                 end
-            end
-
-            if shellData.workbench_pos and VDist(coords, shellData.workbench_pos) <= INTERACT_RADIUS then
+            elseif zone == 'workbench' then
                 DrawWorldPrompt(shellData.workbench_pos, '[E] Tezgahta Silahi Tamir Et')
                 if IsControlJustPressed(0, 38) then
                     local ok, current = pcall(function() return exports['ox_inventory']:GetCurrentWeapon() end)
@@ -342,9 +330,7 @@ CreateThread(function()
                         lib.notify({ title = '[WORKBENCH]', description = 'Elinizde tamir edilebilir bir silah yok.', type = 'error' })
                     end
                 end
-            end
-
-            if shellData.packaging_pos and VDist(coords, shellData.packaging_pos) <= INTERACT_RADIUS then
+            elseif zone == 'packaging' then
                 DrawWorldPrompt(shellData.packaging_pos, '[E] Paketleme Odasini Ac/Kapat')
                 if IsControlJustPressed(0, 38) then
                     TriggerServerEvent('matrix:server:workbench:togglePackagingRoom', insideTrapHouse)
