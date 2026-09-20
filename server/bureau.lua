@@ -827,14 +827,31 @@ local function Reply(src, msg)
     end
 end
 
+-- ★ pcall'lı: MySQL.insert (veya IsValidCoords dışında herhangi bir şey)
+-- beklenmedik şekilde hata verirse artık SESSİZCE yutulmuyor — chat'e
+-- açık bir hata mesajı basılır VE server konsoluna loglanır. Önceki hâl
+-- CreateTrapHouse'u pcall'sız çağırıyordu; bir DB hatası (örn. matrix.sql
+-- hiç import edilmemişse tablo yok) komutun geri kalanını sessizce
+-- durdurup oyuncuya HİÇBİR mesaj göstermeyebiliyordu.
 RegisterCommand('traphouseekle', function(src, args)
     local label = args[1]
     local x, y, z = tonumber(args[2]), tonumber(args[3]), tonumber(args[4])
     if not x or not y or not z then
         Reply(src, 'Kullanim: /traphouseekle [label] [x] [y] [z]'); return
     end
-    Matrix.Bureau.CreateTrapHouse(label, vector3(x, y, z))
-    Reply(src, 'Trap house oluşturma isteği gönderildi (async).')
+
+    local ok, errOrResult = pcall(Matrix.Bureau.CreateTrapHouse, label, vector3(x, y, z))
+    if not ok then
+        Reply(src, ('HATA: trap house olusturulamadi (%s). Server konsolunu kontrol edin.'):format(tostring(errOrResult)))
+        Matrix.Log('BUREAU', '[HATA] /traphouseekle basarisiz: %s', tostring(errOrResult))
+        return
+    end
+    if errOrResult == false then
+        Reply(src, 'HATA: gecersiz koordinat.')
+        return
+    end
+
+    Reply(src, 'Trap house olusturma istegi gonderildi (async). Birkac saniye sonra /traphousedurum ile dogrulayin.')
 end, false)
 
 RegisterCommand('traphousedurum', function(src, args)
