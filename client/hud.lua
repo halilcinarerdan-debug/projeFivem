@@ -484,6 +484,49 @@ local function OpenTrapHouseDurumDialog()
     ExecuteCommand(('traphousedurum %s'):format(houseId))
 end
 
+--- ★ KATMAN 6: "Trap House'a Git" — client/trap_house_client.lua'nın kapı
+--- blip'lerini beslemek için zaten kullandığı AYNI
+--- 'matrix:callback:getTrapHouseLocations' callback'i (server/
+--- trap_house_interior.lua) burada da okunur; yeni bir sunucu-tarafı
+--- endpoint icat EDİLMEZ. server/rendezvous.lua'nın otomatik waypoint
+--- deseniyle (bkz. dosya başı [K4] notu) AYNI native — SetNewWaypoint —
+--- kullanılır; ekstra bir kaynak/bağımlılık GEREKMEZ.
+local function OpenTrapHouseWaypointDialog()
+    local list = lib.callback.await('matrix:callback:getTrapHouseLocations', false)
+    if type(list) ~= 'table' or #list == 0 then
+        if lib and lib.notify then
+            lib.notify({ title = '[TRAP HOUSE]', description = 'Henuz kayitli bir trap house yok.', type = 'inform' })
+        end
+        return
+    end
+
+    local options = {}
+    for i = 1, #list do
+        local entry = list[i]
+        if type(entry) == 'table' and type(entry.id) == 'number' and type(entry.coords) == 'vector3' then
+            options[#options + 1] = { value = tostring(entry.id), label = ('#%d — %s'):format(entry.id, entry.label or 'Trap House') }
+        end
+    end
+    if #options == 0 then return end
+
+    local input = lib.inputDialog('Trap House\'a Git (Waypoint)', {
+        { type = 'select', label = 'Trap House', required = true, options = options }
+    })
+    if not input then return end
+
+    local chosenId = tonumber(input[1])
+    local target
+    for i = 1, #list do
+        if list[i].id == chosenId then target = list[i]; break end
+    end
+    if not target then return end
+
+    SetNewWaypoint(target.coords.x, target.coords.y)
+    if lib and lib.notify then
+        lib.notify({ title = '[TRAP HOUSE]', description = ('Waypoint ayarlandi: #%d %s'):format(target.id, target.label or ''), type = 'inform' })
+    end
+end
+
 local function OpenRutbeAtaDialog()
     local input = lib.inputDialog('/rutbeata - Hiyerarsi Rutbe Atamasi', {
         { type = 'number', label = 'Hedef Server ID', required = true, min = 1, max = 65535 },
@@ -1168,6 +1211,12 @@ OpenTacticalMenu = function()
                 description = 'Trap house desifre/heat/duzenlilik durumunu sorgula',
                 icon        = 'house-signal',
                 onSelect    = OpenTrapHouseDurumDialog
+            },
+            {
+                title       = 'Trap House\'a Git',
+                description = 'Kayitli bir trap house sec, GPS waypoint otomatik ayarlansin',
+                icon        = 'signs-post',
+                onSelect    = OpenTrapHouseWaypointDialog
             },
             {
                 title       = '/rutbeata',
