@@ -370,6 +370,35 @@ RegisterCommand('interiordurum', function(src)
     Reply(src, ('--- Toplam %d oyuncu bir trap house icinde ---'):format(count))
 end, false)
 
+-- =====================================================================
+-- ★ TEST/ADMIN: bir botu bir trap house'a ata (state.trap_house_id).
+-- main.lua'nın /botyarat komutu bunu desteklemiyor (yalnizca isim/rol
+-- alir) -- GetResidentBots'un (yukarida) bir botu "icerde goster"mesi icin
+-- TEK gereken alan bu. Var olan Matrix.CreateBotRecord/Matrix.PersistBot
+-- disinda YENI bir bot yasam dongusu icat edilmez, sadece mevcut alana
+-- yazilir.
+-- =====================================================================
+RegisterCommand('bottraphouseata', function(src, args)
+    local botId       = tonumber(args[1])
+    local trapHouseId = tonumber(args[2])
+    if not botId or not trapHouseId then
+        Reply(src, 'Kullanim: /bottraphouseata [botId] [trapHouseId]'); return
+    end
+
+    local bot = Matrix.Bots and Matrix.Bots[botId]
+    if not bot then Reply(src, ('Bot #%d bulunamadi.'):format(botId)); return end
+    if not Matrix.TrapHouses or not Matrix.TrapHouses[trapHouseId] then
+        Reply(src, ('Trap house #%d bulunamadi.'):format(trapHouseId)); return
+    end
+
+    bot.state.trap_house_id = trapHouseId
+    bot.status = 'active'
+    if Matrix.PersistBot then Matrix.PersistBot(bot) end
+
+    Reply(src, ('Bot #%d (%s) trap house #%d\'e atandi -- iceri girince fiziksel olarak gorunecek.'):format(botId, bot.name, trapHouseId))
+    Matrix.Log('TRAPHOUSE', 'src=%d bot #%d trap house #%d\'e atadi.', src, botId, trapHouseId)
+end, false)
+
 exports('GetTrapHouseBucket', function(trapHouseId) return Matrix.TrapHouseInterior.GetBucket(trapHouseId) end)
 exports('GetTrapHouseOccupants', function(trapHouseId) return Matrix.TrapHouseInterior.GetOccupants(trapHouseId) end)
 exports('GetPlayerTrapHouse', function(src) return Matrix.TrapHouseInterior.GetPlayerTrapHouse(src) end)
