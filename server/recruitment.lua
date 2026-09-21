@@ -307,7 +307,13 @@ end
 -- SIFIR RNG: aynı momentum + aynı taban değerler HER ZAMAN aynı psikolojiyi
 -- üretir.
 -- =====================================================================
-function Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId)
+-- ★ [MADDE 4] loyaltyBase (opsiyonel, varsayilan nil -> CreateBotRecord
+-- kendi 0.5 tabanini kullanir): sokak satisi devsirme cagri yerleri
+-- (server/market.lua net-event'i VE /sokakdevsir test komutu, asagida
+-- AYNI DISIPLIN) 1.0 gecirir -- "Ox_Target ile devsirilen ajan MUTLAK
+-- SADIK" talebi. Momentum/resilience/snitch formulu (yukarida, ESKI
+-- davranis) HIC DEGISMEDI; loyalty_base bagimsiz bir ek alandir.
+function Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId, loyaltyBase)
     npcLabel = (type(npcLabel) == 'string' and npcLabel ~= '') and npcLabel or 'Sokak Ajani'
     trapHouseId = tonumber(trapHouseId)
 
@@ -329,12 +335,13 @@ function Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId)
         economic_pressure = 0.5,
         cognitive_shifter = 0.2,
         skill_chemistry   = 0.1,
-        trap_house_id     = trapHouseId
+        trap_house_id     = trapHouseId,
+        loyalty_base      = loyaltyBase
     })
 
     Matrix.Log('RECRUITMENT',
-        '[SOKAK DEVSIRME] "%s" -> Bot #%d (momentum=%.2f, kaliteFaktoru=%.3f, resilience=%.3f, snitch=%.3f, trap=%s)',
-        npcLabel, bot.id, momentum, qualityFactor, resilience, snitchTendency, tostring(trapHouseId))
+        '[SOKAK DEVSIRME] "%s" -> Bot #%d (momentum=%.2f, kaliteFaktoru=%.3f, resilience=%.3f, snitch=%.3f, loyalty=%.2f, trap=%s)',
+        npcLabel, bot.id, momentum, qualityFactor, resilience, snitchTendency, bot.psychology.loyalty_base, tostring(trapHouseId))
 
     return bot
 end
@@ -554,13 +561,14 @@ end, false)
 
 -- /sokakdevsir [trapHouseId] [isim] - RecruitStreetNpc'yi market.lua'nın
 -- bağımlılık eşiğini beklemeden test etmek için (bkz. /havuztara İLE AYNI
--- disiplin/kapsam: gerçek tetikleyici server/market.lua'dadır).
+-- disiplin/kapsam: gerçek tetikleyici server/market.lua'dadır). loyalty_base
+-- 1.0 sabit -- test yolu, gerçek Ox_Target tetiğiyle AYNI sonucu üretmeli.
 RegisterCommand('sokakdevsir', function(src, args)
     local trapHouseId = tonumber(args[1])
     local label = args[2] or 'Test-Ajan'
-    local bot = Matrix.Recruitment.RecruitStreetNpc(label, trapHouseId)
-    Reply(src, ('"%s" devsirildi -> Bot #%d.'):format(label, bot.id))
+    local bot = Matrix.Recruitment.RecruitStreetNpc(label, trapHouseId, 1.0)
+    Reply(src, ('"%s" devsirildi -> Bot #%d (loyalty_base=%.2f).'):format(label, bot.id, bot.psychology.loyalty_base))
 end, false)
 
 
-exports('RecruitStreetNpc', function(npcLabel, trapHouseId) return Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId) end)
+exports('RecruitStreetNpc', function(npcLabel, trapHouseId, loyaltyBase) return Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId, loyaltyBase) end)

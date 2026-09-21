@@ -1424,10 +1424,19 @@ end
 local streetDealingActive   = false
 local streetDealingEligible = false
 local streetDealingNpc      = nil   -- { ped = entity, spawnedAt = GetGameTimer() }
+-- ★ [MADDE 4] Ileri-bildirim (forward declaration): asagida SpawnStreetNpc
+-- (bu isim henuz TANIMLANMADAN once) Ox_Target onSelect kapaninda bu
+-- fonksiyonu cagirmasi gerekiyor. `local function X` yerine onceden
+-- `local X` bildirip asagida duz atama (`X = function() end`) yapmak,
+-- Lua'nin leksikal kapsam kuralina gore SpawnStreetNpc'nin bu ismi dogru
+-- upvalue olarak yakalamasini saglar -- aksi halde nil global'a cagri
+-- (runtime hatasi) olurdu.
+local OpenStreetDealingRecruitAction
 
 
 local function DespawnStreetNpc()
     if streetDealingNpc and DoesEntityExist(streetDealingNpc.ped) then
+        pcall(function() exports.ox_target:removeLocalEntity(streetDealingNpc.ped) end)
         SetEntityAsNoLongerNeeded(streetDealingNpc.ped)
         DeleteEntity(streetDealingNpc.ped)
     end
@@ -1484,6 +1493,25 @@ local function SpawnStreetNpc(coords)
     SetEntityAsMissionEntity(ped, true, true)
     SetBlockingOfNonTemporaryEvents(ped, true)
     TaskGoToCoordAnyMeans(ped, GetEntityCoords(PlayerPedId()), Config.Market.StreetDealing.NpcWalkSpeed, 0, false, 0, 0.0)
+
+    -- ★ [MADDE 4] Ox_Target: "Kadroya Kat (Ajan Devşir)" -- YENİ bir
+    -- devşirme formülü İCAT ETMEZ, F10 menüsüyle AYNI OpenStreetDealing
+    -- RecruitAction'ı çağırır (bkz. dosya başı forward-declaration
+    -- yorumu). canInteract, streetDealingEligible zaten false iken
+    -- seçeneği gizler -- "henüz hazır değil" bildirimini sadece F10
+    -- yolunda değil burada da gereksiz açmamak için.
+    pcall(function()
+        exports.ox_target:addLocalEntity(ped, {
+            {
+                name        = 'matrix_street_npc_recruit',
+                icon        = 'user-plus',
+                label       = 'Kadroya Kat (Ajan Devşir)',
+                distance    = 2.0,
+                canInteract = function() return streetDealingEligible end,
+                onSelect    = function() OpenStreetDealingRecruitAction() end
+            }
+        })
+    end)
     return ped
 end
 
@@ -1529,7 +1557,7 @@ CreateThread(function()
 end)
 
 
-local function OpenStreetDealingRecruitAction()
+OpenStreetDealingRecruitAction = function()
     if not streetDealingEligible then
         NotifyInvalidInput('Su an devsirmeye hazir bir kes yok.')
         return

@@ -38,6 +38,9 @@ dependencies {
     'qbx_core',
     'oxmysql',
     'ox_inventory',
+    -- ★ KATMAN 7 [T4] FAZ 3: sokak "keş" NPC'sinde "Kadroya Kat (Ajan
+    -- Devşir)" etkileşim seçeneği (client/hud.lua SpawnStreetNpc) için.
+    'ox_target',
     -- ★ KATMAN 6: Trap house iç mekanı (client/trap_house_client.lua)
     -- GTA Online "düşük gelirli ev" interior'ını doğru render etmek için
     -- bu kaynağı kullanır (bkz. shared/config.lua Config.TrapHouseInterior.

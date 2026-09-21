@@ -276,11 +276,11 @@ function Matrix.MarkBotDirty(botId)
 end
 
 
-local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
+local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
 local BOT_UPSERT_HEAD =
     'INSERT INTO matrix_bots (id, dna_id, name, role, status, ' ..
     'fear_factor, resilience, snitch_tendency, economic_pressure, cognitive_shifter, skill_chemistry, ' ..
-    'skill_cyber, skill_logistics, ' ..
+    'skill_cyber, skill_logistics, loyalty_base, ' ..
     'fatigue_level, cortisol_level, withdrawal_index, addiction_level, base_cortisol_recovery_rate, ' ..
     'trap_house_id, updated_at) VALUES '
 local BOT_UPSERT_TAIL =
@@ -290,6 +290,7 @@ local BOT_UPSERT_TAIL =
     'snitch_tendency=VALUES(snitch_tendency), economic_pressure=VALUES(economic_pressure), ' ..
     'cognitive_shifter=VALUES(cognitive_shifter), skill_chemistry=VALUES(skill_chemistry), ' ..
     'skill_cyber=VALUES(skill_cyber), skill_logistics=VALUES(skill_logistics), ' ..
+    'loyalty_base=VALUES(loyalty_base), ' ..
     'fatigue_level=VALUES(fatigue_level), cortisol_level=VALUES(cortisol_level), ' ..
     'withdrawal_index=VALUES(withdrawal_index), addiction_level=VALUES(addiction_level), ' ..
     'base_cortisol_recovery_rate=VALUES(base_cortisol_recovery_rate), ' ..
@@ -322,6 +323,7 @@ local function BuildBotUpsert(botList)
         params[idx] = b.psychology.skill_chemistry           ; idx = idx + 1
         params[idx] = b.psychology.skill_cyber               ; idx = idx + 1
         params[idx] = b.psychology.skill_logistics           ; idx = idx + 1
+        params[idx] = b.psychology.loyalty_base              ; idx = idx + 1
         params[idx] = b.biology.fatigue_level                ; idx = idx + 1
         params[idx] = b.biology.cortisol_level               ; idx = idx + 1
         params[idx] = b.biology.withdrawal_index             ; idx = idx + 1
@@ -407,7 +409,13 @@ function Matrix.CreateBotRecord(profile)
             cognitive_shifter = Matrix.Clamp(profile.cognitive_shifter or 0.5, 0.0, 1.0),
             skill_chemistry   = Matrix.Clamp(profile.skill_chemistry or 0.3,   0.0, 1.0),
             skill_cyber       = Matrix.Clamp(profile.skill_cyber or 0.0,       0.0, 1.0),
-            skill_logistics   = Matrix.Clamp(profile.skill_logistics or 0.0,   0.0, 1.0)
+            skill_logistics   = Matrix.Clamp(profile.skill_logistics or 0.0,   0.0, 1.0),
+            -- ★ [MADDE 4] Ox_Target ile devsirilen sokak ajanlari icin
+            -- 1.0 (mutlak sadik) gecirilir (bkz. server/recruitment.lua
+            -- RecruitStreetNpc). Diger tum cagri yerleri profile.loyalty_base
+            -- GECMEDIGI icin varsayilan 0.5'te kalir -- ESKI davranis
+            -- DEGISMEDI.
+            loyalty_base      = Matrix.Clamp(profile.loyalty_base or 0.5,      0.0, 1.0)
         },
         biology = {
             fatigue_level             = 0.0,
@@ -598,7 +606,8 @@ local function LoadBotsFromDatabase()
                 cognitive_shifter = row.cognitive_shifter or 0.5,
                 skill_chemistry   = row.skill_chemistry   or 0.3,
                 skill_cyber       = row.skill_cyber       or 0.0,
-                skill_logistics   = row.skill_logistics   or 0.0
+                skill_logistics   = row.skill_logistics   or 0.0,
+                loyalty_base      = row.loyalty_base      or 0.5
             },
             biology = {
                 fatigue_level             = row.fatigue_level              or 0.0,
@@ -2670,7 +2679,8 @@ exports('EvaluateInterrogation',  function(s) return Matrix.Recruitment.Evaluate
 local VALID_PSYCHOLOGY_FIELDS = {
     fear_factor = true, resilience = true, snitch_tendency = true,
     economic_pressure = true, cognitive_shifter = true,
-    skill_chemistry = true, skill_cyber = true, skill_logistics = true
+    skill_chemistry = true, skill_cyber = true, skill_logistics = true,
+    loyalty_base = true
 }
 local VALID_BIOLOGY_FIELDS = {
     fatigue_level = true, cortisol_level = true, withdrawal_index = true,
@@ -2684,7 +2694,7 @@ RegisterCommand('botskill', function(src, args)
     local value = tonumber(args[3])
     local bot = botId and Matrix.Bots[botId]
     if not bot or not VALID_PSYCHOLOGY_FIELDS[field] or not value then
-        Reply(src, 'Kullanim: /botskill [id] [fear_factor|resilience|snitch_tendency|economic_pressure|cognitive_shifter|skill_chemistry|skill_cyber|skill_logistics] [0.0-1.0]')
+        Reply(src, 'Kullanim: /botskill [id] [fear_factor|resilience|snitch_tendency|economic_pressure|cognitive_shifter|skill_chemistry|skill_cyber|skill_logistics|loyalty_base] [0.0-1.0]')
         return
     end
     bot.psychology[field] = Matrix.Clamp(value, 0.0, 1.0)
@@ -2738,11 +2748,11 @@ RegisterCommand('matrixdump', function(src)
     local count = 0
     for id, bot in pairs(Matrix.Bots) do
         count = count + 1
-        Reply(src, ('#%d [%s|%s|%s] Fat:%.2f Cort:%.2f With:%.2f | Chem:%.2f Cyber:%.2f Log:%.2f | Res:%.2f Snitch:%.2f | Mekanik:%.2f'):format(
+        Reply(src, ('#%d [%s|%s|%s] Fat:%.2f Cort:%.2f With:%.2f | Chem:%.2f Cyber:%.2f Log:%.2f | Res:%.2f Snitch:%.2f Loyal:%.2f | Mekanik:%.2f'):format(
             id, bot.name, bot.role, bot.status,
             bot.biology.fatigue_level, bot.biology.cortisol_level, bot.biology.withdrawal_index,
             bot.psychology.skill_chemistry, bot.psychology.skill_cyber, bot.psychology.skill_logistics,
-            bot.psychology.resilience, bot.psychology.snitch_tendency,
+            bot.psychology.resilience, bot.psychology.snitch_tendency, bot.psychology.loyalty_base or 0.5,
             bot.state.weapon_wear_level or 1.0))
     end
     Reply(src, ('--- Toplam %d bot ---'):format(count))

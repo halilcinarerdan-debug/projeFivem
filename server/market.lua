@@ -1667,11 +1667,14 @@ RegisterNetEvent('matrix:server:streetDealing:recruit', function(npcCoords, npcL
 
 
     local trapHouseId = FindNearestTrapHouseCoordsForHud(coords)
-    local bot = Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId)
+    -- ★ [MADDE 4] loyalty_base=1.0: Ox_Target "Kadroya Kat" tetigiyle
+    -- gelen tek gercek devsirme yolu -- bkz. server/recruitment.lua
+    -- RecruitStreetNpc yorumu.
+    local bot = Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId, 1.0)
     StreetAddiction[key] = 0.0
 
 
-    Reply(src, ('"%s" devsirildi -> Bot #%d.'):format(tostring(npcLabel or 'Sokak Ajani'), bot.id))
+    Reply(src, ('"%s" devsirildi -> Bot #%d (loyalty_base=%.2f).'):format(tostring(npcLabel or 'Sokak Ajani'), bot.id, bot.psychology.loyalty_base))
 end)
 
 
