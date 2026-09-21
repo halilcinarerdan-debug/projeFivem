@@ -1,362 +1,1403 @@
 -- =====================================================================
--- MATRIX FORENSICS / server/forensics.lua
--- [K7-2/3] Real-Time Frisk / Çevirme Muhafızı - Büro polislerinin 8m adli
--- çemberi içinde `FriskDwellMs` boyunca kalan bot/oyuncu otomatik "Adli
--- Üst Araması"na tabi tutulur. Sahte plaka, BM- seri numaralı silah,
--- 2 dakikayı aşmış burner phone veya saflığı bozuk/tahrif edilmiş
--- uyuşturucu paketi bulunursa: delil indeksi anında sıçrar ve kalıcı el
--- koyma (SeizeVehicle / WipeBallisticRecord) otomatik tetiklenir.
+-- MATRIX FORENSICS / forensics.lua
+-- In-memory balistik cache, lokal ID allocator, async insert.
 --
--- Tek thread, Config.Forensics.TickIntervalMs'de bir uyanır (varsayılan
--- 1000ms) - polis yoksa hiçbir tarama yapılmaz. 0.00ms resmon doktrini.
+-- ★ KATMAN 5 REVİZYONU: EVRİLEN BALİSTİK (Gauss Çekirdeği Mutasyonu) ★
+--   Silahın KENDİ canı (ox_inventory item durability, weaponInventoryId/
+--   weaponSlot üzerinden okunur) artık namlu iz netliğini (Q_kovan)
+--   ÇARPIMSAL olarak mutasyona uğratır: Q_kovan = Q_kovan_taban * durability.
+--   durability [0,1]'e clamp'li olduğundan bu ASLA taban formülün üstüne
+--   çıkmaz — sadece eskimiş silahlar daha da düşük netlik üretir. Silah canı
+--   %50'nin altına düşünce eşleşme kesinliği (match_certainty) ÜSTEL olarak
+--   baltalanır ("Adli Laboratuvar Körlüğü"); %20'nin altında deterministik
+--   Jam_Chance formülü 0.65'in üzerine çıkar ve buna bağlı bir kalıcı-ölüm
+--   riski değeri hesaplanır (asıl tutukluk/RNG çözümü — varsa — çatışma
+--   sistemine aittir; burada sadece SAF, tekrar üretilebilir formül üretilir).
+--   RNG YOK: aynı (weaponWear, cortisol, durability) üçlüsü HER ZAMAN aynı
+--   çıktıyı üretir.
+--
+-- ★ KATMAN 5 SERTLEŞTİRME REVİZYONU (önceki tur, korunuyor):
+--   [F1] BallisticCache için FIFO tabanlı bir üst sınır (4096 kayıt):
+--        çok uzun uptime'larda (haftalarca açık kalan sunucu) tekil silah
+--        serisi sayısı teorik olarak sınırsız büyüyebilir; bu üst sınır RAM
+--        şişmesini yapısal olarak engeller. Gerçek LRU DEĞİLDİR — basit
+--        "insert-order FIFO" (son eklenenler değil, İLK eklenenler atılır).
+--        Atılan bir seri yeniden ateşlenirse DB'de zaten var olduğundan
+--        (ON DUPLICATE KEY) sorunsuz yeniden cache'e girer.
+--   [F2] Wear flush için retry kuyruğu: bir UPDATE hata verirse (geçici DB
+--        kesintisi vb.) kayıp gitmez, bir sonraki 20sn'lik tick'te tekrar
+--        denenir.
+--   [F3] Adli Laboratuvar Körlüğü formülündeki math.exp çağrısına
+--        `math_max(rate, 1e-9)` guard'ı eklendi. NOT — dürüst açıklama:
+--        rate=0 durumu zaten NaN ÜRETMEZ (exp(-0*deficit)=exp(0)=1.0,
+--        matematiksel olarak tanımlı); bu guard bir NaN riskini KAPATMIYOR,
+--        yalnızca "decay rate sıfırsa körlük etkisi tam olarak devre dışı
+--        kalsın" niyetini AÇIKÇA ifade eden zararsız bir savunma katmanıdır.
+--   [F4] Event bridge'ler ve LoadCaches artık pcall ile sarmalı (bkz.
+--        main.lua [H6] ile AYNI disiplin) — tek bir ateşleme olayındaki
+--        beklenmedik hata event handler'ı ya da resource başlangıcını
+--        düşürmez.
+--   [F5] /balistikcache debug komutu: LRU/retry kuyruklarının anlık RAM
+--        boyutlarını gösterir (yeni sınırların gerçekten iş gördüğünü
+--        doğrulamak için).
+--
+-- ★ KATMAN 5 ULTIMATE [U3] — GERÇEKÇİ BALİSTİK SABİTLEME (bu sürüm, yeni):
+--   Namlu atış ömrü + gerçek-zamanlı mekanik tutukluk (jam) mekaniği.
+--   ÖNEMLİ: bu, YUKARIDAKİ Jam_Chance/GetHardDeleteRiskIfJammed formülünün
+--   YERİNE GEÇMEZ — o formül SAF bir "adli/kalıcı-ölüm risk değeri" üretici
+--   olarak AYNEN korunuyor (kanıt raporlarında hâlâ görünür). Burada
+--   eklenen `Mechanical*` ailesi TAMAMEN AYRI, gerçek OYNANIŞ mekaniğidir:
+--     - Her atışta (OnWeaponShotFired) silahın canı, o silah tipinin gerçek
+--       namlu atış ömrüne göre (Config.Forensics.WeaponShotLifespan)
+--       düşürülür: durability = 100 * (1 - shots_fired/lifespan).
+--     - Can, Config.Forensics.MechanicalJamThresholdPercent (%40)'ın
+--       altına indiğinde her atışta ÜSSEL artan bir olasılık DEĞERİ
+--       hesaplanır: Jam_Probability = (1-(Durability/40))^3 * 0.35.
+--     - "0 RNG" prensibi HARFİYEN korunur: bu olasılık klasik bir zar
+--       atışına DEĞİL, item metadata'sında tutulan deterministik bir
+--       biriktiriciye (jam_accumulator) eklenir. Biriktirici 1.0'i
+--       GEÇTİĞİ AN tutukluk KESİN olarak tetiklenir ve taşan kısım bir
+--       sonraki atışa taşınır (Bresenham-tarzı deterministik oranlama —
+--       uzun vadede TAM OLARAK beklenen sıklığı üretir, ama HER adım
+--       tekrar-üretilebilirdir; aynı atış dizisi HER ZAMAN aynı anda
+--       tutukluk üretir). RNG YOK.
+--   Namlu değişimi (/namludegistir, server/blackmarket.lua'nın sattığı
+--   Yedek Namlu'yu tüketir) durability/shots_fired/jam_accumulator'ı
+--   sıfırlar VE WipeBallisticRecord ile o silahın TÜM balistik/adli
+--   kaydını (cache + matrix_ballistic_weapons + matrix_forensic_evidence)
+--   kalıcı olarak siler — "Büro tamamen kör edilir".
 -- =====================================================================
 
-Matrix = Matrix or {}
-Matrix.Bureau = Matrix.Bureau or {}
+
 Matrix.Forensics = Matrix.Forensics or {}
 
-local pairs, ipairs, type = pairs, ipairs, type
-local math_min, math_max = math.min, math.max
-local os_time = os.time
-local GetPlayers = GetPlayers
-local GetPlayerPed = GetPlayerPed
-local GetEntityCoords = GetEntityCoords
-local GetVehiclePedIsIn = GetVehiclePedIsIn
-local GetVehicleNumberPlateText = GetVehicleNumberPlateText
-local NetworkGetNetworkIdFromEntity = NetworkGetNetworkIdFromEntity
-local NetworkGetEntityFromNetworkId = NetworkGetEntityFromNetworkId
 
-local Inventory = Config.Core.Inventory
+local pairs, ipairs, type, tostring = pairs, ipairs, type, tostring
+local tonumber, table, math       = tonumber, table, math
+local math_max, math_min          = math.max, math.min
+local math_exp                    = math.exp
+local GetGameTimer                = GetGameTimer
 
-local dwellTimers = {}   -- suspectKey -> accumulated ms in the circle
-local searchCooldowns = {} -- suspectKey -> os_time() of last search
 
-Matrix.Bureau.EvidenceIndex = Matrix.Bureau.EvidenceIndex or {}
-Matrix.Forensics.ScratchedPlates = Matrix.Forensics.ScratchedPlates or {}
-Matrix.Forensics.WipedSerials = Matrix.Forensics.WipedSerials or {}
-Matrix.Forensics.SeizedVehicles = Matrix.Forensics.SeizedVehicles or {}
+-- [F1] LRU(FIFO) cap
+local BALLISTIC_CACHE_MAX = 4096
 
--- Bot peds registered by other modules (logistics / a future bot-AI
--- spawner) so the frisk sweep can reach them, not just real players.
--- entry: { netId, ownerId }
-Matrix.Forensics.BotPeds = Matrix.Forensics.BotPeds or {}
 
-function Matrix.Forensics.RegisterBotPed(botId, netId, ownerId)
-    Matrix.Forensics.BotPeds[botId] = { netId = netId, ownerId = ownerId }
+-- weaponSerial -> { ballistic_id, wear_level }
+local BallisticCache = {}
+-- Insert sırası (FIFO budama için)
+local BallisticInsertOrder = {}
+-- ballistic_id -> pendingWear
+local PendingWearUpdates = {}
+-- [F2] Bir önceki flush'ta başarısız olan yazımlar
+local WearRetryQueue = {}
+
+
+-- Forensic evidence için lokal ID allocator (async INSERT'e izin verir)
+local EvidenceNextId     = 1
+local EvidenceIdSynced   = false
+
+
+-- =====================================================================
+-- [F1] FIFO BUDAMA
+-- En eski eklenmiş kayıtları düşürür (gerçek LRU değil — "insert-order
+-- FIFO", basit ve deterministik). KARMAŞIKLIK: O(n) sadece cap aşıldığında
+-- çalışır (her insert'te değil), pratikte nadiren tetiklenir.
+-- =====================================================================
+local function EvictBallisticCacheIfNeeded()
+    local n = 0
+    for _ in pairs(BallisticCache) do n = n + 1 end
+    if n <= BALLISTIC_CACHE_MAX then return end
+
+
+    local excess = n - BALLISTIC_CACHE_MAX
+    local removed = 0
+    local i = 1
+    while removed < excess and i <= #BallisticInsertOrder do
+        local serial = BallisticInsertOrder[i]
+        if serial and BallisticCache[serial] then
+            BallisticCache[serial] = nil
+            removed = removed + 1
+        end
+        BallisticInsertOrder[i] = nil
+        i = i + 1
+    end
+    -- Kalan sırayı öne sıkıştır (delikli dizi bırakma).
+    local j = 1
+    for k = i, #BallisticInsertOrder do
+        BallisticInsertOrder[j] = BallisticInsertOrder[k]
+        j = j + 1
+    end
+    for k = j, #BallisticInsertOrder do BallisticInsertOrder[k] = nil end
 end
 
-function Matrix.Forensics.MarkPlateScratched(plate)
-    Matrix.Forensics.ScratchedPlates[plate] = true
+
+local function GetActorDnaId(actor)
+    if not actor then return 'UNKNOWN' end
+    return actor.dna_id or 'UNKNOWN'
 end
 
--- ---------------------------------------------------------------------
--- Evidence index: a 0-100 confidence meter per target. "%20 zıplat"
--- moves it 20% of the remaining distance to 100 - guaranteed forward
--- movement even from 0, asymptotic towards the cap.
--- ---------------------------------------------------------------------
-function Matrix.Bureau.BumpEvidenceIndex(targetId, pct)
-    pct = pct or Config.Forensics.EvidenceIndexJumpPct
-    local cur = Matrix.Bureau.EvidenceIndex[targetId] or 0
-    local newVal = math_min(100, cur + (100 - cur) * pct)
-    Matrix.Bureau.EvidenceIndex[targetId] = newVal
-    Matrix.Log('FORENSICS', 'evidence index for %s: %.1f -> %.1f', tostring(targetId), cur, newVal)
-    return newVal
+
+local function GetActorCortisol(actor)
+    if not actor or not actor.biology then return 0.0 end
+    return Matrix.Clamp(actor.biology.cortisol_level or 0.0, 0.0, 1.0)
 end
 
-function Matrix.Bureau.GetEvidenceIndex(targetId)
-    return Matrix.Bureau.EvidenceIndex[targetId] or 0
+
+-- ★ KATMAN 5: silahın KENDİ canı (ox_inventory item durability, [0,100])
+-- weaponInventoryId/weaponSlot üzerinden okunur ve [0,1]'e normalize edilir.
+-- Metadata yoksa (silah hiç ateşlenmemiş/canı hiç ayarlanmamış) varsayılan
+-- 1.0 (tam sağlam) - mutasyon formülü bu durumda taban formülü DEĞİŞTİRMEZ.
+local function GetWeaponDurability(weaponInventoryId, weaponSlot)
+    if not weaponInventoryId or type(weaponSlot) ~= 'number' then return 1.0 end
+    local meta = Matrix.Inventory.GetSlotMetadata(weaponInventoryId, weaponSlot)
+    local durability = tonumber(meta.durability)
+    if not durability then return 1.0 end
+    return Matrix.Clamp(durability / 100.0, 0.0, 1.0)
 end
 
--- ---------------------------------------------------------------------
--- Permanent seizure exports
--- ---------------------------------------------------------------------
-function Matrix.Bureau.SeizeVehicle(plate, netId, reason)
-    Matrix.Forensics.SeizedVehicles[plate] = { at = os_time(), reason = reason }
 
-    if netId then
-        local ok = pcall(function()
-            local veh = NetworkGetEntityFromNetworkId(netId)
-            if veh and veh ~= 0 then
-                DeleteEntity(veh)
+-- FORMÜL: Q_iz = clamp(1.0 - cortisol_level * FingerprintQualityCortisolWeight, 0, 1)
+-- Yorum: el terlemesi (kortizol/panik) parmak izi netliğini DOĞRUSAL olarak
+-- düşürür; ağırlık sabiti (0.4) tek bir çarpandır, RNG YOK. O(1) karmaşıklık -
+-- her çağrıda tek bir clamp+çarpma; 0 Resmon açısından maliyetsizdir.
+function Matrix.Forensics.ComputeFingerprintQuality(actor)
+    local cortisol = GetActorCortisol(actor)
+    return Matrix.Clamp(1.0 - (cortisol * Config.Forensics.FingerprintQualityCortisolWeight), 0.0, 1.0)
+end
+
+
+-- FORMÜL (Katman 5 — Tutukluk / Jam Chance):
+--   durability >= WeaponJamChanceThreshold  -> 0.0 (risk yok)
+--   durability <  WeaponJamChanceThreshold  -> WeaponJamBaseChance * (1 + deficitRatio)
+--   deficitRatio = (threshold - durability) / threshold  ∈ (0,1]
+-- Yorum: eşiğin hemen altında tabana (%65) sıçrar, sonra durability sıfıra
+-- yaklaştıkça DOĞRUSAL büyümeye devam eder (deficitRatio→1 iken chance→2x
+-- taban, clamp ile [0,1]'e sınırlanır). RNG YOK; asıl "tutukluk oldu mu"
+-- kararı (ve buna bağlı gerçek zaman içi rulet) bu formülü TÜKETEN çatışma
+-- sistemine aittir — burada sadece deterministik olasılık DEĞERİ üretilir.
+--
+-- ★ NOT: Bu SAF adli/kalıcı-ölüm risk formülüdür (DEĞİŞMEDİ). Gerçek-zamanlı
+-- oynanış tutukluğu için aşağıdaki Matrix.Forensics.ComputeMechanicalJamProbability
+-- + Matrix.Forensics.OnWeaponShotFired'a bakın (Katman 5 ULTIMATE [U3]).
+function Matrix.Forensics.ComputeJamChance(weaponDurability)
+    weaponDurability = Matrix.Clamp(tonumber(weaponDurability) or 1.0, 0.0, 1.0)
+    local threshold = Config.Forensics.WeaponJamChanceThreshold
+    if weaponDurability >= threshold then return 0.0 end
+
+
+    local deficitRatio = (threshold - weaponDurability) / math_max(threshold, 0.0001)
+    return Matrix.Clamp(Config.Forensics.WeaponJamBaseChance * (1.0 + deficitRatio), 0.0, 1.0)
+end
+
+
+-- Jam_Chance eşiğin (WeaponJamChanceThreshold) altındaki silahlar için sabit
+-- bir kalıcı-ölüm risk DEĞERİ döner (WeaponJamHardDeleteRisk); eşiğin
+-- üstündeyse 0.0. Bu da SAF bir formüldür — hangi sistemin bu riski nasıl
+-- kullanacağı (RNG'li mi, eşik-tabanlı mı) bu dosyanın kapsamı DIŞINDADIR.
+function Matrix.Forensics.GetHardDeleteRiskIfJammed(weaponDurability)
+    if Matrix.Forensics.ComputeJamChance(weaponDurability) > 0.0 then
+        return Config.Forensics.WeaponJamHardDeleteRisk
+    end
+    return 0.0
+end
+
+
+-- =====================================================================
+-- ★ KATMAN 5 ULTIMATE [U3]: NAMLU ATIŞ ÖMRÜ + MEKANİK TUTUKLUK FORMÜLLERİ
+-- =====================================================================
+
+
+--- Silah item adına göre gerçek namlu atış ömrünü (kaç atışta can 0'a
+--- iner) döner. Bilinmeyen bir item için Config.Forensics.
+--- WeaponShotLifespanDefault kullanılır (asla nil/0 dönmez -> /0 riski yok).
+function Matrix.Forensics.GetWeaponShotLifespan(weaponItemName)
+    local table_ = Config.Forensics.WeaponShotLifespan
+    local lifespan = (type(weaponItemName) == 'string' and table_[weaponItemName])
+        or Config.Forensics.WeaponShotLifespanDefault
+        or 15000
+    lifespan = tonumber(lifespan) or 15000
+    if lifespan <= 0 then lifespan = 15000 end
+    return lifespan
+end
+
+
+-- FORMÜL (Katman 5 ULTIMATE — Gerçek-Zamanlı Mekanik Tutukluk):
+--   durability (%) >= MechanicalJamThresholdPercent (40) -> 0.0 (risk yok)
+--   durability (%) <  40 -> (1.0 - (Durability/40))^3 * 0.35
+-- Yorum: eşiğin hemen altında YUMUŞAK başlar (kübik üs sayesinde), can
+-- sıfıra yaklaştıkça ÜSSEL hızlanır. Durability=0 iken tam katsayıya
+-- (0.35) ulaşır. RNG YOK — bu SAF bir olasılık DEĞERİDİR; gerçek tetikleme
+-- Matrix.Forensics.OnWeaponShotFired'daki deterministik biriktirici
+-- (jam_accumulator) tarafından yapılır (bkz. dosya başı [U3] açıklaması).
+-- KARMAŞIKLIK: O(1).
+function Matrix.Forensics.ComputeMechanicalJamProbability(durability)
+    durability = Matrix.Clamp(tonumber(durability) or 100.0, 0.0, 100.0)
+    local threshold = Config.Forensics.MechanicalJamThresholdPercent
+    if durability >= threshold then return 0.0 end
+
+
+    local ratio = Matrix.Clamp(1.0 - (durability / math_max(threshold, 0.0001)), 0.0, 1.0)
+    local exponent = Config.Forensics.MechanicalJamExponent or 3
+    local probability = (ratio ^ exponent) * (Config.Forensics.MechanicalJamCoefficient or 0.35)
+    return Matrix.Clamp(probability, 0.0, 1.0)
+end
+
+
+-- =====================================================================
+-- LOAD CACHE
+-- =====================================================================
+function Matrix.Forensics.LoadCaches()
+    -- Ballistic weapons
+    local rows = MySQL.query.await('SELECT weapon_serial, ballistic_id, wear_level FROM matrix_ballistic_weapons', {}) or {}
+    for _, row in ipairs(rows) do
+        BallisticCache[row.weapon_serial] = {
+            ballistic_id = row.ballistic_id,
+            wear_level   = row.wear_level or 0.0
+        }
+        BallisticInsertOrder[#BallisticInsertOrder + 1] = row.weapon_serial
+    end
+    Matrix.Log('FORENSICS', '%d balistik silah önbelleğe yüklendi.', #rows)
+    EvictBallisticCacheIfNeeded()
+
+
+    -- Evidence id watermark
+    local r = MySQL.query.await('SELECT COALESCE(MAX(id),0) AS mx FROM matrix_forensic_evidence', {}) or {}
+    local mx = (r[1] and r[1].mx) or 0
+    EvidenceNextId   = mx + 1
+    EvidenceIdSynced = true
+    Matrix.Log('FORENSICS', 'Kanıt ID watermark: %d', EvidenceNextId)
+end
+
+
+-- [F4] pcall: LoadCaches sırasında beklenmedik hata resource başlangıcını
+-- (diğer dosyaların CreateThread'lerini) düşürmez.
+CreateThread(function()
+    local ok, err = pcall(Matrix.Forensics.LoadCaches)
+    if not ok then
+        Matrix.Log('FORENSICS', '[HATA] LoadCaches basarisiz (yutuldu): %s', tostring(err))
+    end
+end)
+
+
+local function NextEvidenceId()
+    if not EvidenceIdSynced then return nil end
+    local id = EvidenceNextId
+    EvidenceNextId = id + 1
+    return id
+end
+
+
+-- =====================================================================
+-- BALLISTIC REGISTRATION (cache'ten, async upsert)
+-- =====================================================================
+function Matrix.Forensics.RegisterOrGetBallisticId(weaponSerial, weaponWear)
+    if type(weaponSerial) ~= 'string' or weaponSerial == '' then return nil end
+    weaponWear = Matrix.Clamp(tonumber(weaponWear) or 0.0, 0.0, 1.0)
+
+
+    local cached = BallisticCache[weaponSerial]
+    if cached then
+        if cached.wear_level ~= weaponWear then
+            cached.wear_level = weaponWear
+            PendingWearUpdates[cached.ballistic_id] = weaponWear
+        end
+        return cached.ballistic_id
+    end
+
+
+    local ballisticId = ('BAL-%s-%06X'):format(
+        weaponSerial:sub(-4),
+        (GetGameTimer() + #weaponSerial) % 0xFFFFFF
+    )
+
+
+    BallisticCache[weaponSerial] = {
+        ballistic_id = ballisticId,
+        wear_level   = weaponWear
+    }
+    BallisticInsertOrder[#BallisticInsertOrder + 1] = weaponSerial
+
+
+    MySQL.prepare([[
+        INSERT INTO matrix_ballistic_weapons
+            (ballistic_id, weapon_serial, wear_level, sealed_as_crime_weapon, first_registered)
+        VALUES (?, ?, ?, 0, NOW())
+        ON DUPLICATE KEY UPDATE wear_level = VALUES(wear_level)
+    ]], { ballisticId, weaponSerial, weaponWear })
+
+
+    -- [F1] Yeni satır eklendikten sonra üst sınır kontrolü.
+    EvictBallisticCacheIfNeeded()
+
+
+    Matrix.Log('FORENSICS', 'Yeni balistik imza: %s (Seri: %s)', ballisticId, weaponSerial)
+    return ballisticId
+end
+
+
+-- =====================================================================
+-- WEAPON FIRE SIMULATION
+--
+-- FORMÜL (Namlu Yiv-Set İmzası / kovan iz netliği):
+--   Q_kovan_taban   = clamp(1.0 - weaponWear*CasingWearWeight - cortisol*CasingCortisolWeight, 0, 1)
+--   Q_kovan         = clamp(Q_kovan_taban * weaponDurability, 0, 1)      [★ Katman 5 mutasyonu]
+--   match_certainty = clamp(Q_kovan * BallisticStriationPrecision, 0, 1)
+--   (match_certainty < LabBlindnessThreshold ise ★ üstel körlük uygulanır)
+--   sealed_as_crime_weapon = match_certainty > MatchCertaintyThreshold
+-- Yorum: iki bağımsız aşınma kaynağı (mekanik weaponWear, biyolojik cortisol)
+-- doğrusal olarak Q_kovan_taban'dan çıkarılır; silahın KENDİ canı bunu
+-- ÇARPIMSAL olarak mutasyona uğratır (weaponDurability=1.0 iken formül
+-- ESKİSİYLE BİREBİR AYNIDIR — geriye dönük uyumlu). Tüm terimler [0,1]
+-- aralığına clamp'lidir -> taşma/negatif olasılık riski yok. RNG YOK: aynı
+-- (weaponWear, cortisol, weaponDurability) üçlüsü HER ZAMAN aynı
+-- match_certainty'i üretir (tekrar edilebilirlik = test edilebilirlik).
+-- KARMAŞIKLIK: O(1) - tek çağrıda sabit sayıda aritmetik işlem.
+-- =====================================================================
+function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, evidenceType, weaponDurability)
+    local actor = Matrix.ResolveActor(actorRef)
+    if not actor then return nil end
+
+
+    weaponWear       = Matrix.Clamp(tonumber(weaponWear) or 0.0, 0.0, 1.0)
+    evidenceType     = evidenceType or 'casing'
+    weaponDurability = Matrix.Clamp(tonumber(weaponDurability) or 1.0, 0.0, 1.0)
+
+
+    local ballisticId = Matrix.Forensics.RegisterOrGetBallisticId(weaponSerial, weaponWear)
+    if not ballisticId then return nil end
+
+
+    local cortisol = GetActorCortisol(actor)
+    local qKovanBase = Matrix.Clamp(
+        1.0 - (weaponWear * Config.Forensics.CasingWearWeight)
+            - (cortisol   * Config.Forensics.CasingCortisolWeight),
+        0.0, 1.0
+    )
+
+
+    -- ★ GAUSS ÇEKİRDEĞİ MUTASYONU (bkz. dosya başı yorumu).
+    local qKovan = Matrix.Clamp(qKovanBase * weaponDurability, 0.0, 1.0)
+
+
+    local fingerprintQuality = Matrix.Forensics.ComputeFingerprintQuality(actor)
+    local dnaId              = GetActorDnaId(actor)
+    local matchCertainty     = Matrix.Clamp(qKovan * Config.BallisticStriationPrecision, 0.0, 1.0)
+
+
+    -- ★ ADLİ LABORATUVAR KÖRLÜĞÜ: silah canı eşiğin altındaysa eşleşme
+    -- kesinliği ÜSTEL olarak baltalanır (deficit büyüdükçe çöküş hızlanır).
+    -- Eşiğin ÜSTÜNDEKİ silahlar için deficit<=0 -> çarpan=1 -> HİÇ etkisi yok.
+    -- [F3] rate en az 1e-9'a sabitlenir (bkz. dosya başı dürüst açıklama:
+    -- bu bir NaN riskini KAPATMIYOR, sadece niyeti açıkça ifade ediyor).
+    if weaponDurability < Config.Forensics.WeaponDurabilityLabBlindnessThreshold then
+        local deficit = Config.Forensics.WeaponDurabilityLabBlindnessThreshold - weaponDurability
+        local rate    = math_max(Config.Forensics.WeaponDurabilityBlindnessDecayRate or 0.0, 1e-9)
+        matchCertainty = Matrix.Clamp(matchCertainty * math_exp(-rate * deficit), 0.0, 1.0)
+    end
+
+
+    local sealed = matchCertainty > Config.Forensics.MatchCertaintyThreshold
+
+
+    local stateCoords = actor.state and actor.state.coords
+    local cx, cy, cz  = 0.0, 0.0, 0.0
+    if stateCoords then cx, cy, cz = stateCoords.x, stateCoords.y, stateCoords.z end
+
+
+    -- Lokal ID tahsis (async insert)
+    local evidenceId = NextEvidenceId()
+
+
+    if evidenceId then
+        MySQL.prepare([[
+            INSERT INTO matrix_forensic_evidence
+                (id, ballistic_id, evidence_type, striation_quality, fingerprint_id, fingerprint_quality,
+                 match_certainty, sealed_as_crime_weapon, coords_x, coords_y, coords_z, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ]], {
+            evidenceId, ballisticId, evidenceType, qKovan, dnaId, fingerprintQuality,
+            matchCertainty, sealed and 1 or 0, cx, cy, cz
+        })
+    else
+        -- watermark henüz hazır değilse fallback async insert (id olmadan)
+        MySQL.prepare([[
+            INSERT INTO matrix_forensic_evidence
+                (ballistic_id, evidence_type, striation_quality, fingerprint_id, fingerprint_quality,
+                 match_certainty, sealed_as_crime_weapon, coords_x, coords_y, coords_z, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ]], {
+            ballisticId, evidenceType, qKovan, dnaId, fingerprintQuality,
+            matchCertainty, sealed and 1 or 0, cx, cy, cz
+        })
+    end
+
+
+    if sealed then
+        MySQL.prepare([[
+            UPDATE matrix_ballistic_weapons
+            SET sealed_as_crime_weapon = 1, seal_certainty = ?
+            WHERE ballistic_id = ?
+        ]], { matchCertainty, ballisticId })
+        Matrix.Log('FORENSICS', '[MÜHÜRLENDI] %s suç aleti (%.4f)', ballisticId, matchCertainty)
+    end
+
+
+    return {
+        evidence_id         = evidenceId or -1,
+        ballistic_id        = ballisticId,
+        dna_id              = dnaId,
+        weapon_wear         = weaponWear,
+        weapon_durability   = weaponDurability,
+        striation_quality   = qKovan,
+        fingerprint_quality = fingerprintQuality,
+        match_certainty     = matchCertainty,
+        sealed              = sealed,
+        jam_chance          = Matrix.Forensics.ComputeJamChance(weaponDurability),
+        hard_delete_risk    = Matrix.Forensics.GetHardDeleteRiskIfJammed(weaponDurability)
+    }
+end
+
+
+-- ★ KATMAN 5: market.lua'nın undercover ajan tetiği için — bir alıcının
+-- gizli ajan olduğu teslimat anında ANLAŞILDIĞINDA (bkz. market.lua
+-- Matrix.Market.EvaluateSale) ilgili balistik kaydı otomatik %100
+-- kesinlikle mühürlenir. RNG yok, tek bir deterministik DB yazımı.
+function Matrix.Forensics.ForceSeal(ballisticId)
+    if type(ballisticId) ~= 'string' or ballisticId == '' then return false end
+
+
+    MySQL.prepare([[
+        UPDATE matrix_ballistic_weapons
+        SET sealed_as_crime_weapon = 1, seal_certainty = 1.0
+        WHERE ballistic_id = ?
+    ]], { ballisticId })
+
+
+    Matrix.Log('FORENSICS', '[UNDERCOVER TETİĞİ] %s otomatik %%100 kesinlikle mühürlendi.', ballisticId)
+    return true
+end
+
+
+-- =====================================================================
+-- ★ KATMAN 5 ULTIMATE [U3]: TAM BALİSTİK ARŞİV SİLME (Namlu Değişimi)
+-- /namludegistir tarafından çağrılır — hem RAM cache'inden hem de kalıcı
+-- DB'den (matrix_ballistic_weapons + ona bağlı matrix_forensic_evidence
+-- satırları) o silahın TÜM geçmişini kalıcı olarak siler. NOT: bu,
+-- dosya başındaki "adli kayıt asla silinmez" politikasının BİLİNÇLİ tek
+-- istisnasıdır — "namlu değiştirildiğinde Büro'nun geçmiş kaydı tamamen
+-- silinir" doğrudan bu görevin gereğidir (kirli iş: gerçek bir suç
+-- organizasyonunun namlu değiştirerek adli geçmişini yok etmesi).
+-- =====================================================================
+function Matrix.Forensics.WipeBallisticRecord(weaponSerial)
+    if type(weaponSerial) ~= 'string' or weaponSerial == '' then return false end
+
+
+    local cached = BallisticCache[weaponSerial]
+    local ballisticId = cached and cached.ballistic_id
+
+
+    BallisticCache[weaponSerial] = nil
+    -- BallisticInsertOrder'daki referans bir sonraki EvictBallisticCacheIfNeeded
+    -- çağrısında doğal olarak temizlenir (nil-guard zaten mevcut).
+
+
+    if not ballisticId then return true end
+
+
+    PendingWearUpdates[ballisticId] = nil
+    WearRetryQueue[ballisticId] = nil
+
+
+    MySQL.prepare('DELETE FROM matrix_forensic_evidence WHERE ballistic_id = ?', { ballisticId })
+    MySQL.prepare('DELETE FROM matrix_ballistic_weapons WHERE ballistic_id = ?', { ballisticId })
+
+
+    Matrix.Log('FORENSICS', '[BURO KORLESTIRILDI] Namlu degisimi: %s balistik kaydi tamamen silindi.', ballisticId)
+    return true
+end
+
+
+-- =====================================================================
+-- ★ KATMAN 5 ULTIMATE [U3]: GERÇEK-ZAMANLI ATIŞ İŞLEME (Mekanik Tutukluk)
+-- client/hud.lua'daki mermi-sayısı-azalma tespiti (ammo-delta polling,
+-- IsPedShooting yerine — tam/otomatik ateş serilerinde daha güvenilir)
+-- her atışta 'matrix:server:reportWeaponShotFired' tetikler; bu da bu
+-- fonksiyona iner. Mevcut kovan-tabanlı OnWeaponFired/SimulateWeaponFire
+-- akışına (ayrı bir fiziksel kovan nesnesi toplanmasını gerektirir) HİÇ
+-- DOKUNMAZ — yalnızca o akışın okuduğu `durability` metadata alanını
+-- gerçek-zamanlı olarak günceller (bir sonraki kovan tabanlı analizde
+-- GetWeaponDurability zaten en güncel değeri okuyacaktır).
+-- =====================================================================
+function Matrix.Forensics.OnWeaponShotFired(actorRef, weaponItemName, weaponSerial, weaponInventoryId, weaponSlot)
+    if not weaponInventoryId or type(weaponSlot) ~= 'number' then return nil, 'bad_slot' end
+    if type(weaponSerial) ~= 'string' or weaponSerial == '' then return nil, 'bad_serial' end
+
+
+    local meta = Matrix.Inventory.GetSlotMetadata(weaponInventoryId, weaponSlot)
+    if meta.jammed then return nil, 'already_jammed' end
+
+
+    local shotsFired = (tonumber(meta.shots_fired) or 0) + 1
+    local lifespan    = Matrix.Forensics.GetWeaponShotLifespan(weaponItemName)
+    local durability  = Matrix.Clamp(100.0 * (1.0 - (shotsFired / lifespan)), 0.0, 100.0)
+
+
+    local jamProbability = Matrix.Forensics.ComputeMechanicalJamProbability(durability)
+
+
+    -- ★ 0 RNG DETERMİNİSTİK TUTUKLUK (bkz. dosya başı [U3] açıklaması):
+    -- olasılık değeri bir biriktiriciye eklenir; biriktirici 1.0'i
+    -- geçtiği AN tutukluk KESİN tetiklenir, taşan kısım bir sonraki atışa
+    -- devreder. Aynı atış dizisi HER ZAMAN aynı tutukluk anını üretir.
+    local accumulator = (tonumber(meta.jam_accumulator) or 0.0) + jamProbability
+    local jammed = false
+    if accumulator >= 1.0 then
+        jammed = true
+        accumulator = accumulator - 1.0
+    end
+
+
+    Matrix.Inventory.MergeMetadata(weaponInventoryId, weaponSlot, {
+        weapon_serial   = weaponSerial,
+        shots_fired     = shotsFired,
+        durability      = durability,
+        jam_accumulator = accumulator,
+        jammed          = jammed
+    })
+
+
+    return {
+        durability      = durability,
+        jam_probability = jamProbability,
+        jammed          = jammed,
+        shots_fired     = shotsFired
+    }
+end
+
+
+--- ★ KATMAN 5 ULTIMATE [U3]: 'X' tuşu / F10 "Sıkışan Silahı Tahliye Et"
+--- (6 saniyelik lib.progressCircle, client/hud.lua) tamamlandığında
+--- çağrılır. jam_accumulator BİLİNÇLİ OLARAK SIFIRLANMAZ — risk namlu
+--- değişene kadar (/namludegistir) yüksek kalmaya devam eder; yalnızca
+--- ANLIK tutukluk (jammed) kaldırılır, silah tekrar ateşlenebilir olur.
+function Matrix.Forensics.ClearMechanicalJam(weaponInventoryId, weaponSlot)
+    if not weaponInventoryId or type(weaponSlot) ~= 'number' then return false end
+    local meta = Matrix.Inventory.GetSlotMetadata(weaponInventoryId, weaponSlot)
+    if not meta.jammed then return false end
+
+
+    Matrix.Inventory.MergeMetadata(weaponInventoryId, weaponSlot, { jammed = false })
+    return true
+end
+
+
+-- =====================================================================
+-- ADLİ KRİMİNAL RAPORU (ASCII, askeri evrak formatı) - ox_inventory
+-- item.metadata.description alanına basılır, tooltip'te gösterilir.
+-- =====================================================================
+local REPORT_WIDTH = 36
+local REPORT_BORDER = ('='):rep(REPORT_WIDTH)
+local REPORT_DIVIDER = ('-'):rep(REPORT_WIDTH)
+
+
+local function ReportLine(label, value)
+    return ('%-13s: %s'):format(label, tostring(value))
+end
+
+
+function Matrix.Forensics.BuildForensicReport(data)
+    local lines = {
+        REPORT_BORDER,
+        '     ADLI KRIMINAL RAPORU',
+        REPORT_DIVIDER,
+        ReportLine('BALISTIK ID', data.ballistic_id or 'BILINMIYOR'),
+        ReportLine('KANIT TIPI', data.evidence_type or 'casing'),
+        ReportLine('STRIASYON', ('%.3f'):format(data.striation_quality or 0.0)),
+        ReportLine('PARMAK IZI', data.fingerprint_id or 'BILINMIYOR'),
+        ReportLine('IZ NETLIGI', ('%.3f'):format(data.fingerprint_quality or 0.0)),
+        ReportLine('ESLESME', ('%.3f'):format(data.match_certainty or 0.0)),
+        ReportLine('MUHUR', data.sealed and 'MUHURLENDI' or 'MUHURLENMEDI')
+    }
+
+
+    -- ★ Katman 5: sadece çağıran taraf weapon_durability sağladıysa eklenir
+    -- (geriye dönük uyumluluk — eski/DB'den yeniden üretilen raporlar bu
+    -- alanı hiç geçmez ve çıktı ESKİSİYLE BİREBİR AYNI kalır).
+    if data.weapon_durability ~= nil then
+        lines[#lines + 1] = ReportLine('SILAH CANI', ('%.1f%%'):format(data.weapon_durability * 100.0))
+        lines[#lines + 1] = ReportLine('TUTUKLUK RISKI', ('%.3f'):format(data.jam_chance or 0.0))
+    end
+
+
+    lines[#lines + 1] = REPORT_DIVIDER
+    lines[#lines + 1] = ReportLine('KAYIT', os.date('%Y-%m-%d %H:%M:%S'))
+    lines[#lines + 1] = REPORT_BORDER
+
+
+    return table.concat(lines, '\n')
+end
+
+
+function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
+    if not casingInventoryId or type(casingSlot) ~= 'number' then return nil end
+
+
+    local casingMeta = Matrix.Inventory.GetSlotMetadata(casingInventoryId, casingSlot)
+    local durability = tonumber(casingMeta.durability) or 100.0
+    durability = Matrix.Clamp(durability, 0.0, 100.0)
+    local weaponWear = Matrix.Clamp(1.0 - (durability / 100.0), 0.0, 1.0)
+
+
+    -- ★ Katman 5: bu, kovanın KENDİ aşınması (weaponWear) İLE AYNI ŞEY
+    -- DEĞİLDİR — silahın (weaponInventoryId/weaponSlot) kendi canıdır.
+    local weaponDurability = GetWeaponDurability(weaponInventoryId, weaponSlot)
+
+
+    local result = Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, 'casing', weaponDurability)
+    if not result then return nil end
+
+
+    local report = Matrix.Forensics.BuildForensicReport({
+        ballistic_id        = result.ballistic_id,
+        evidence_type        = 'casing',
+        striation_quality    = result.striation_quality,
+        fingerprint_id        = result.dna_id,
+        fingerprint_quality  = result.fingerprint_quality,
+        match_certainty      = result.match_certainty,
+        sealed                = result.sealed
+    })
+
+
+    Matrix.Inventory.MergeMetadata(casingInventoryId, casingSlot, {
+        ballistic_id       = result.ballistic_id,
+        striation_quality  = result.striation_quality,
+        fingerprint_id     = result.dna_id,
+        fingerprint_quality= result.fingerprint_quality,
+        description        = report
+    })
+
+
+    -- Silahın kendisi de (kovan değil) incelendiğinde aynı adli özet görünsün.
+    if weaponInventoryId and type(weaponSlot) == 'number' then
+        Matrix.Inventory.MergeMetadata(weaponInventoryId, weaponSlot, {
+            ballistic_id      = result.ballistic_id,
+            weapon_wear       = result.weapon_wear,
+            weapon_durability = result.weapon_durability,
+            jam_chance        = result.jam_chance,
+            description       = Matrix.Forensics.BuildForensicReport({
+                ballistic_id         = result.ballistic_id,
+                evidence_type         = 'weapon',
+                striation_quality     = result.striation_quality,
+                fingerprint_id         = result.dna_id,
+                fingerprint_quality   = result.fingerprint_quality,
+                match_certainty       = result.match_certainty,
+                sealed                 = result.sealed,
+                weapon_durability     = result.weapon_durability,
+                jam_chance             = result.jam_chance
+            })
+        })
+    end
+
+
+    return result.evidence_id, result.match_certainty, result.sealed, result.jam_chance, result.hard_delete_risk
+end
+
+
+-- =====================================================================
+-- TOUCH STAMP
+-- =====================================================================
+function Matrix.Forensics.StampTouch(actorRef, inventoryId, slot)
+    local actor = Matrix.ResolveActor(actorRef)
+    if not actor then return nil end
+    if not inventoryId or type(slot) ~= 'number' then return nil end
+
+
+    local q  = Matrix.Forensics.ComputeFingerprintQuality(actor)
+    local dna= GetActorDnaId(actor)
+
+
+    Matrix.Inventory.MergeMetadata(inventoryId, slot, {
+        fingerprint_id      = dna,
+        fingerprint_quality = q
+    })
+
+
+    MySQL.prepare([[
+        INSERT INTO matrix_touch_log
+            (fingerprint_id, fingerprint_quality, inventory_id, slot_id, created_at)
+        VALUES (?, ?, ?, ?, NOW())
+    ]], { dna, q, tostring(inventoryId), slot })
+
+
+    return q
+end
+
+
+-- =====================================================================
+-- LAB ANALYSIS
+-- =====================================================================
+function Matrix.Forensics.AnalyzeEvidence(evidenceId)
+    if type(evidenceId) ~= 'number' then return nil end
+
+
+    local rows = MySQL.query.await('SELECT * FROM matrix_forensic_evidence WHERE id = ?', { evidenceId })
+    local evidence = rows and rows[1]
+    if not evidence then return nil end
+
+
+    local q        = Matrix.Clamp(tonumber(evidence.striation_quality) or 0.0, 0.0, 1.0)
+    local match    = Matrix.Clamp(q * Config.BallisticStriationPrecision, 0.0, 1.0)
+    local sealed   = match > Config.Forensics.MatchCertaintyThreshold
+
+
+    MySQL.prepare([[
+        UPDATE matrix_forensic_evidence
+        SET match_certainty = ?, sealed_as_crime_weapon = ?
+        WHERE id = ?
+    ]], { match, sealed and 1 or 0, evidenceId })
+
+
+    if sealed then
+        MySQL.prepare([[
+            UPDATE matrix_ballistic_weapons
+            SET sealed_as_crime_weapon = 1, seal_certainty = ?
+            WHERE ballistic_id = ?
+        ]], { match, evidence.ballistic_id })
+        Matrix.Log('FORENSICS', 'Lab: kanıt #%d -> %s mühürlendi (%.4f)', evidenceId, evidence.ballistic_id, match)
+    else
+        Matrix.Log('FORENSICS', 'Lab: kanıt #%d yetersiz eşleşme (%.4f)', evidenceId, match)
+    end
+
+
+    return match, sealed
+end
+
+
+-- =====================================================================
+-- WEAR FLUSH (ticker zamanlı, ana ticker'a yük olmasın diye ayrı thread)
+-- [F2] Başarısız yazımlar WearRetryQueue'ya düşer, bir sonraki tick'te
+-- öncelikli olarak tekrar denenir (kayıp yok, bindirme yok).
+-- =====================================================================
+CreateThread(function()
+    while true do
+        Wait(20000)
+
+
+        for bid, wear in pairs(WearRetryQueue) do
+            PendingWearUpdates[bid] = wear
+            WearRetryQueue[bid] = nil
+        end
+
+
+        for bid, wear in pairs(PendingWearUpdates) do
+            PendingWearUpdates[bid] = nil
+            local ok = pcall(function()
+                MySQL.prepare('UPDATE matrix_ballistic_weapons SET wear_level = ? WHERE ballistic_id = ?', { wear, bid })
+            end)
+            if not ok then
+                WearRetryQueue[bid] = wear
             end
-        end)
-        if not ok then
-            Matrix.Log('FORENSICS', 'SeizeVehicle: could not resolve/delete entity for plate=%s (netId=%s)', tostring(plate), tostring(netId))
         end
     end
+end)
 
-    -- If this was a logistics bot's assigned vehicle, unregister it too.
-    if Matrix.Logistics and Matrix.Logistics.BotVehicles then
-        for botId, bot in pairs(Matrix.Logistics.BotVehicles) do
-            if bot.plate == plate then
-                Matrix.Logistics.BotVehicles[botId] = nil
-            end
-        end
+
+-- =====================================================================
+-- EVENT BRIDGE (guard'lı)
+-- =====================================================================
+RegisterNetEvent('matrix:server:reportWeaponDischarge', function(weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(weaponSerial) ~= 'string' or #weaponSerial == 0 or #weaponSerial > 64 then return end
+    if type(casingInventoryId) ~= 'string' or type(casingSlot) ~= 'number' then return end
+    if weaponInventoryId ~= nil and type(weaponInventoryId) ~= 'string' then weaponInventoryId = nil end
+    if type(weaponSlot) ~= 'number' then weaponSlot = nil end
+    local ok, err = pcall(Matrix.Forensics.OnWeaponFired, { kind = 'player', source = src }, weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
+    if not ok then Matrix.Log('FORENSICS', '[HATA] reportWeaponDischarge basarisiz (yutuldu): %s', tostring(err)) end
+end)
+
+
+RegisterNetEvent('matrix:server:reportObjectTouch', function(inventoryId, slot)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(inventoryId) ~= 'string' or type(slot) ~= 'number' then return end
+    local ok, err = pcall(Matrix.Forensics.StampTouch, { kind = 'player', source = src }, inventoryId, slot)
+    if not ok then Matrix.Log('FORENSICS', '[HATA] reportObjectTouch basarisiz (yutuldu): %s', tostring(err)) end
+end)
+
+
+-- ★ KATMAN 5 ULTIMATE [U3]: gerçek-zamanlı atış bildirimi. weaponSerial
+-- İSTEMCİDEN GÜVENİLMEZ — sunucu, gönderilen slot'un KENDİ metadata'sından
+-- weapon_serial'i okuyup kullanır (bütünlük garantisi). Seri numarası
+-- taşımayan bir silah (karaborsa/adli sistemden hiç geçmemiş) bu event
+-- tarafından İZLENMEZ.
+RegisterNetEvent('matrix:server:reportWeaponShotFired', function(weaponItemName, weaponSlot)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(weaponItemName) ~= 'string' or #weaponItemName == 0 or #weaponItemName > 64 then return end
+    if type(weaponSlot) ~= 'number' then return end
+
+
+    local weaponInventoryId = tostring(src)
+    local meta = Matrix.Inventory.GetSlotMetadata(weaponInventoryId, weaponSlot)
+    local weaponSerial = meta.weapon_serial
+    if type(weaponSerial) ~= 'string' or weaponSerial == '' then return end
+
+
+    local ok, result = pcall(Matrix.Forensics.OnWeaponShotFired,
+        { kind = 'player', source = src }, weaponItemName, weaponSerial, weaponInventoryId, weaponSlot)
+    if not ok then
+        Matrix.Log('FORENSICS', '[HATA] reportWeaponShotFired basarisiz (yutuldu): %s', tostring(result))
+        return
     end
 
-    Matrix.Log('FORENSICS', 'SEIZED VEHICLE plate=%s reason=%s', tostring(plate), tostring(reason))
-end
 
-function Matrix.Bureau.WipeBallisticRecord(weaponSerial)
-    Matrix.Forensics.WipedSerials[weaponSerial] = os_time()
-
-    if Matrix.BlackMarket and Matrix.BlackMarket.InvalidateSerial then
-        pcall(Matrix.BlackMarket.InvalidateSerial, weaponSerial)
+    if type(result) == 'table' and result.jammed then
+        TriggerClientEvent('matrix:client:weaponJamStateChanged', src, weaponSlot, true)
+        Matrix.Log('FORENSICS', '[MEKANIK TUTUKLUK] src=%d slot=%d silah=%s durability=%.1f%% jam_p=%.3f',
+            src, weaponSlot, weaponItemName, result.durability, result.jam_probability)
     end
+end)
 
-    Matrix.Log('FORENSICS', 'WIPED BALLISTIC RECORD serial=%s', tostring(weaponSerial))
-end
 
--- ---------------------------------------------------------------------
--- On-duty police lookup (QBCore convention)
--- ---------------------------------------------------------------------
-local function getOnDutyOfficers()
-    local officers = {}
-    local ok = pcall(function()
-        local QBCore = exports[Config.Core.Resource]:GetCoreObject()
-        for _, source in ipairs(GetPlayers()) do
-            source = tonumber(source)
-            local ply = QBCore.Functions.GetPlayer(source)
-            if ply and ply.PlayerData and ply.PlayerData.job
-                and ply.PlayerData.job.name == Config.Forensics.PoliceJob
-                and ply.PlayerData.job.onduty then
-                local coords = GetEntityCoords(GetPlayerPed(source))
-                officers[#officers + 1] = { source = source, coords = coords }
-            end
-        end
-    end)
-    if not ok then return {} end
-    return officers
-end
+-- ★ KATMAN 5 ULTIMATE [U3]: 'X' tuşu / F10 tahliye progressCircle
+-- tamamlandığında client bunu tetikler. jam_accumulator SIFIRLANMAZ (bkz.
+-- Matrix.Forensics.ClearMechanicalJam yorumu) — risk namlu değişene kadar
+-- yüksek kalır.
+RegisterNetEvent('matrix:server:clearWeaponJam', function(weaponSlot)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(weaponSlot) ~= 'number' then return end
 
-local function distance(a, b)
-    local dx, dy, dz = a.x - b.x, a.y - b.y, (a.z or 0) - (b.z or 0)
-    return math.sqrt(dx * dx + dy * dy + dz * dz)
-end
 
-local function nearestOfficerDistance(coords, officers)
-    local best = math.huge
-    local bestSource = nil
-    for _, officer in ipairs(officers) do
-        local d = distance(coords, officer.coords)
-        if d < best then
-            best = d
-            bestSource = officer.source
-        end
+    local weaponInventoryId = tostring(src)
+    local ok, cleared = pcall(Matrix.Forensics.ClearMechanicalJam, weaponInventoryId, weaponSlot)
+    if not ok then
+        Matrix.Log('FORENSICS', '[HATA] clearWeaponJam basarisiz (yutuldu): %s', tostring(cleared))
+        return
     end
-    return best, bestSource
-end
-
--- ---------------------------------------------------------------------
--- Inventory contraband inspection (defensive ox_inventory search)
--- ---------------------------------------------------------------------
-local function searchAllSlots(inv)
-    local ok, slots = pcall(function()
-        return exports[Inventory]:Search(inv, 'slots')
-    end)
-    if not ok or not slots then return {} end
-    if slots.name then slots = { slots } end
-    return slots
-end
-
-local function removeFromInventory(inv, item, count, metadata)
-    local ok, removed = pcall(function()
-        return exports[Inventory]:RemoveItem(inv, item, count, metadata)
-    end)
-    return ok and removed
-end
-
-local function isPackagedItem(itemName)
-    for _, name in pairs(Config.Kitchen.Packaging.PackagedItem) do
-        if name == itemName then return true end
+    if cleared then
+        TriggerClientEvent('matrix:client:weaponJamStateChanged', src, weaponSlot, false)
+        Matrix.Log('FORENSICS', '[TUTUKLUK GIDERILDI] src=%d slot=%d (risk namlu degisene kadar yuksek kalir).', src, weaponSlot)
     end
-    return false
-end
+end)
 
--- Returns a list of contraband findings: { {kind, ...}, ... }
-local function inspectInventory(inv)
-    local findings = {}
 
-    for _, slot in ipairs(searchAllSlots(inv)) do
-        local metadata = slot.metadata or {}
-
-        local serial = metadata.serial or metadata.weapon_serial
-        if serial and tostring(serial):sub(1, #Config.Forensics.WeaponSerialContrabandPrefix) == Config.Forensics.WeaponSerialContrabandPrefix then
-            findings[#findings + 1] = { kind = 'weapon', item = slot.name, serial = serial, slot = slot.slot }
-        end
-
-        if slot.name == 'burner_phone' and metadata.acquiredAt then
-            local heldSeconds = os_time() - metadata.acquiredAt
-            if heldSeconds > Config.Forensics.BurnerPhoneMaxHoldSeconds then
-                findings[#findings + 1] = { kind = 'burner_phone', item = slot.name, heldSeconds = heldSeconds, metadata = metadata }
-            end
-        end
-
-        if isPackagedItem(slot.name) then
-            local purity = tonumber(metadata.purity) or 0
-            local tampered = false
-            if Matrix.Kitchen and Matrix.Kitchen.ComputeIntegrityHash and metadata.checksum then
-                local ok, expected = pcall(Matrix.Kitchen.ComputeIntegrityHash, metadata.drugType, purity, metadata.packagedAt, metadata.batchId)
-                tampered = ok and expected ~= metadata.checksum
-            end
-            if tampered or purity < Config.Market.GourmetMinPurity then
-                findings[#findings + 1] = { kind = 'drugs', item = slot.name, purity = purity, tampered = tampered, metadata = metadata, count = slot.count }
-            end
-        end
-    end
-
-    return findings
-end
-
--- ---------------------------------------------------------------------
--- Adli Üst Araması - runs against either a real player (source) or a
--- registered bot ped (botId + netId).
--- ---------------------------------------------------------------------
-local function performForensicSearch(suspectKey, targetInv, ped, ownerId, isBot, officerSource)
-    local findings = inspectInventory(targetInv)
-
-    -- Vehicle plate check (independent of inventory contents).
-    local veh = ped and GetVehiclePedIsIn(ped, false)
-    if veh and veh ~= 0 then
-        local plate = GetVehicleNumberPlateText(veh):gsub('%s+$', '')
-        local scratched = Matrix.Forensics.ScratchedPlates[plate]
-        if not scratched and Matrix.BlackMarket and Matrix.BlackMarket.IsScratchedPlate then
-            local ok, result = pcall(Matrix.BlackMarket.IsScratchedPlate, plate)
-            scratched = ok and result
-        end
-        if scratched then
-            findings[#findings + 1] = { kind = 'vehicle', plate = plate, netId = NetworkGetNetworkIdFromEntity(veh) }
-        end
-    end
-
-    if #findings == 0 then
-        Matrix.Log('FORENSICS', 'frisk on %s: clean', tostring(suspectKey))
-        if officerSource then
-            TriggerClientEvent('matrix:client:hud:friskResult', officerSource, suspectKey, false, {})
+-- =====================================================================
+-- ★ KATMAN 5 ULTIMATE [U3]: /namludegistir — YEDEK NAMLU DEĞİŞİMİ
+-- server/blackmarket.lua'nın sattığı Config.BlackMarket.SpareBarrelItem'ı
+-- tüketir; silahı fabrika ayarlarına (durability=100, shots_fired=0,
+-- jam_accumulator=0, jammed=false) döndürür VE eski seri numarasının
+-- TÜM balistik/adli kaydını (WipeBallisticRecord) kalıcı olarak siler —
+-- "Büro tamamen kör edilir". Yeni bir weapon_serial atanır (server/
+-- blackmarket.lua ile AYNI deterministik/RNG'siz üretim şemasını kullanır).
+-- =====================================================================
+RegisterCommand('namludegistir', function(src, args)
+    local weaponSlot = tonumber(args[1])
+    if type(src) ~= 'number' or src <= 0 or not weaponSlot then
+        if type(src) == 'number' and src > 0 then
+            TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', 'Kullanim: /namludegistir [silahSlotu] (F10 menusunden kullanin)' } })
         end
         return
     end
 
-    Matrix.Bureau.BumpEvidenceIndex(ownerId or suspectKey)
+
+    local weaponInventoryId = tostring(src)
+    local ok, weaponItem = pcall(exports['ox_inventory'].GetSlot, exports['ox_inventory'], weaponInventoryId, weaponSlot)
+    if not ok or type(weaponItem) ~= 'table' or type(weaponItem.name) ~= 'string' then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', 'Belirtilen slotta silah bulunamadi.' } })
+        return
+    end
+
+
+    if not (Config.BlackMarket and Config.BlackMarket.ReplaceableWeaponItems and Config.BlackMarket.ReplaceableWeaponItems[weaponItem.name]) then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', 'Bu silah turu icin namlu degisimi desteklenmiyor.' } })
+        return
+    end
+
+
+    local barrelItem = Config.BlackMarket and Config.BlackMarket.SpareBarrelItem
+    if not barrelItem then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', 'Yedek Namlu sistemi yapilandirilmamis.' } })
+        return
+    end
+
+
+    local countOk, barrelCount = pcall(exports['ox_inventory'].Search, exports['ox_inventory'], weaponInventoryId, 'count', barrelItem)
+    barrelCount = (countOk and tonumber(barrelCount)) or 0
+    if barrelCount < 1 then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', 'Yedek Namlu bulunamadi. Once Karaborsa Ticaret Agi uzerinden satin alin.' } })
+        return
+    end
+
+
+    local removeOk = pcall(function()
+        return exports['ox_inventory']:RemoveItem(weaponInventoryId, barrelItem, 1)
+    end)
+    if not removeOk then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', 'Yedek Namlu tuketilemedi.' } })
+        return
+    end
+
+
+    local oldMeta   = weaponItem.metadata or {}
+    local oldSerial = oldMeta.weapon_serial
+
+
+    local state = Matrix.GetOrCreatePlayerState(src)
+    local citizenid = (state and state.citizenid) or ('SRC-%d'):format(src)
+
+
+    local newSerial
+    if Matrix.BlackMarket and Matrix.BlackMarket.GenerateWeaponSerial then
+        newSerial = Matrix.BlackMarket.GenerateWeaponSerial(citizenid, weaponItem.name)
+    else
+        newSerial = ('BM-%s-%07X'):format(weaponItem.name:sub(-6):upper(), (GetGameTimer() + weaponSlot) % 0xFFFFFFF)
+    end
+
+
+    if type(oldSerial) == 'string' and oldSerial ~= '' then
+        pcall(Matrix.Forensics.WipeBallisticRecord, oldSerial)
+    end
+
+
+    Matrix.Inventory.MergeMetadata(weaponInventoryId, weaponSlot, {
+        weapon_serial   = newSerial,
+        shots_fired     = 0,
+        durability      = 100.0,
+        jam_accumulator = 0.0,
+        jammed          = false,
+        description     = '[YENI NAMLU TAKILDI]\nBuro balistik arsivi tamamen silindi.'
+    })
+
+
+    TriggerClientEvent('matrix:client:weaponJamStateChanged', src, weaponSlot, false)
+    TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', '[NAMLU DEGISTIRILDI] Buro balistik arsivi tamamen kor edildi. Silah fabrika ayarlarina donduruldu.' } })
+    Matrix.Log('FORENSICS', '[NAMLU DEGISIMI] src=%d silah=%s eski-seri=%s yeni-seri=%s', src, weaponItem.name, tostring(oldSerial), newSerial)
+end, false)
+
+
+-- =====================================================================
+-- MONOKROM TAKTİK DEBUG PANELİ (herkese açık test grubu, restricted=false)
+-- Q_kovan = 1.0 - (weaponWear*0.3) - (cortisol*0.2) ve fingerprint = 1.0 -
+-- (cortisol*0.4) formüllerini gerçek bir ateşleme olayı beklemeden manuel
+-- gözlemlemek/manipüle etmek için. Hiçbir komut formülün KENDİSİNİ değiştirmez.
+-- =====================================================================
+local function Reply(src, msg)
+    if type(src) == 'number' and src > 0 then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', msg } })
+    else
+        print(('[MATRIX:FORENSICS:CONSOLE] %s'):format(msg))
+    end
+end
+
+
+-- /forensicdump [ballisticId] - bir silahın kalıcı SQL kaydını ve ona bağlı
+-- en yeni 10 kanıt satırını (matrix_forensic_evidence, asla silinmez) döker.
+RegisterCommand('forensicdump', function(src, args)
+    local ballisticId = args[1]
+    if type(ballisticId) ~= 'string' then Reply(src, 'Kullanim: /forensicdump [ballisticId]'); return end
+
+
+    local weaponRows = MySQL.query.await('SELECT * FROM matrix_ballistic_weapons WHERE ballistic_id = ?', { ballisticId }) or {}
+    local weapon = weaponRows[1]
+    if not weapon then Reply(src, 'Balistik ID bulunamadı.'); return end
+
+
+    Reply(src, ('Silah: %s | Seri:%s | Aşınma:%.3f | Mühür:%s | Kesinlik:%s'):format(
+        weapon.ballistic_id, weapon.weapon_serial, weapon.wear_level,
+        tostring(weapon.sealed_as_crime_weapon == 1), tostring(weapon.seal_certainty)))
+
+
+    local evidenceRows = MySQL.query.await(
+        'SELECT * FROM matrix_forensic_evidence WHERE ballistic_id = ? ORDER BY id DESC LIMIT 10', { ballisticId }
+    ) or {}
+    Reply(src, ('--- %d kanıt satırı (en yeni 10) ---'):format(#evidenceRows))
+    for _, ev in ipairs(evidenceRows) do
+        Reply(src, ('  #%d [%s] Striasyon:%.3f Eşleşme:%.3f Mühür:%s'):format(
+            ev.id, ev.evidence_type, ev.striation_quality, ev.match_certainty, tostring(ev.sealed_as_crime_weapon == 1)))
+    end
+end, false)
+
+
+-- /forensicrapor [evidenceId] - kalıcı kanıt satırından ASCII "Adli Kriminal
+-- Raporu"nu yeniden üretip konsola basar (BuildForensicReport'un gerçek DB
+-- verisiyle tekrar üretilebilir/deterministik olduğunu doğrular).
+RegisterCommand('forensicrapor', function(src, args)
+    local evidenceId = tonumber(args[1])
+    if not evidenceId then Reply(src, 'Kullanim: /forensicrapor [evidenceId]'); return end
+
+
+    local rows = MySQL.query.await('SELECT * FROM matrix_forensic_evidence WHERE id = ?', { evidenceId })
+    local evidence = rows and rows[1]
+    if not evidence then Reply(src, 'Kanıt bulunamadı.'); return end
+
+
+    local report = Matrix.Forensics.BuildForensicReport({
+        ballistic_id         = evidence.ballistic_id,
+        evidence_type        = evidence.evidence_type,
+        striation_quality    = evidence.striation_quality,
+        fingerprint_id       = evidence.fingerprint_id,
+        fingerprint_quality  = evidence.fingerprint_quality,
+        match_certainty      = evidence.match_certainty,
+        sealed               = evidence.sealed_as_crime_weapon == 1
+    })
+    print(report)
+    Reply(src, ('Kanıt #%d raporu konsola basıldı.'):format(evidenceId))
+end, false)
+
+
+-- /asinmaayarla [seri] [0.0-1.0] - weapon_wear'ı gerçek bir ateşleme
+-- döngüsünü (RegisterOrGetBallisticId) beklemeden doğrudan yazar; Q_kovan
+-- formülünün weaponWear ekseni boyunca davranışını test etmek içindir.
+RegisterCommand('asinmaayarla', function(src, args)
+    local serial = args[1]
+    local wear = Matrix.Clamp(tonumber(args[2]) or 0.0, 0.0, 1.0)
+    if type(serial) ~= 'string' then Reply(src, 'Kullanim: /asinmaayarla [seri] [0.0-1.0]'); return end
+
+
+    local cached = BallisticCache[serial]
+    if not cached then Reply(src, 'Bu seri henüz balistik olarak kayıtlı değil (önce ateşlenmeli).'); return end
+
+
+    cached.wear_level = wear
+    MySQL.prepare('UPDATE matrix_ballistic_weapons SET wear_level = ? WHERE weapon_serial = ?', { wear, serial })
+    Reply(src, ('%s aşınması %.3f olarak ayarlandı.'):format(serial, wear))
+end, false)
+
+
+-- ★ KATMAN 5 debug komutu: /silahasindir [slot] [miktar 0-100] - çağıran
+-- oyuncunun KENDİ envanterindeki [slot]'taki silahın ox_inventory durability
+-- metadata'sını doğrudan yazar (gerçek bir çatışma/aşınma döngüsü beklemeden
+-- Gauss mutasyon formülünü test etmek içindir). Bir sonraki ateşlemede
+-- OnWeaponFired bu değeri okuyup Q_kovan'ı mutasyona uğratır.
+RegisterCommand('silahasindir', function(src, args)
+    local slot = tonumber(args[1])
+    local amount = Matrix.Clamp(tonumber(args[2]) or 100.0, 0.0, 100.0)
+    if type(src) ~= 'number' or src <= 0 or not slot then
+        Reply(src, 'Kullanim: /silahasindir [slot] [miktar 0-100]'); return
+    end
+
+
+    -- ox_inventory: oyuncu envanteri event köprüsündeki diğer inventoryId'ler
+    -- gibi string olarak ele alınır (bkz. reportWeaponDischarge guard'ı).
+    local inventoryId = tostring(src)
+    Matrix.Inventory.MergeMetadata(inventoryId, slot, { durability = amount })
+
+
+    Reply(src, ('Slot #%d silah canı %.1f olarak ayarlandı (Jam_Chance:%.3f). Bir sonraki ateşlemede Q_kovan mutasyona uğrayacak.'):format(
+        slot, amount, Matrix.Forensics.ComputeJamChance(amount / 100.0)))
+end, false)
+
+
+-- [F5] /balistikcache - LRU/retry kuyruklarının anlık RAM boyutlarını gösterir.
+RegisterCommand('balistikcache', function(src)
+    local n = 0
+    for _ in pairs(BallisticCache) do n = n + 1 end
+    local pn = 0
+    for _ in pairs(PendingWearUpdates) do pn = pn + 1 end
+    local rn = 0
+    for _ in pairs(WearRetryQueue) do rn = rn + 1 end
+
+
+    Reply(src, ('BallisticCache: %d/%d | InsertOrder:%d | PendingWear:%d | WearRetry:%d'):format(
+        n, BALLISTIC_CACHE_MAX, #BallisticInsertOrder, pn, rn))
+end, false)
+
+
+-- =====================================================================
+-- ★★★ KATMAN 7 FAZ 2: REAL-TIME ÜST ARAMA / ÇEVİRME ★★★
+-- Bu dosyanın YUKARIDAKİ hiçbir balistik/kovan/mekanik-tutukluk formülüne
+-- DOKUNULMADI -- burası TAMAMEN AYRI, ek bir kontrabant tarama/el koyma
+-- katmanıdır. İKİ giriş noktası paylaşılan aynı tarama/el-koyma çiftini
+-- (ScanInventoryContraband/SeizeContraband) kullanır:
+--   1) Matrix.Forensics.InspectBustedBot -- server/main.lua'nın ZATEN VAR
+--      OLAN DISPATCH_BUSTED_* dwell mekaniğinin (main.lua'da DEĞİŞTİRİLMEDİ)
+--      DOĞAL SONUCU olarak Matrix.CompleteDispatch'in 'busted' dalından
+--      çağrılır (bkz. main.lua dosya başı FAZ 2 notu) -- bota AYRI bir
+--      taşıma/dwell thread'i İCAT EDİLMEZ.
+--   2) Matrix.Forensics.InspectPlayer -- GERÇEK oyuncular için, aşağıdaki
+--      YENİ 8m/6sn dwell thread'i tarafından tetiklenir (botların aksine
+--      oyuncuların kendi "yakalanma" mekaniği yoktur, bu yüzden burada
+--      genuinely yeni, küçük bir tarama thread'i gerekir).
+--
+-- KONTRABANT TÜRLERİ (hepsi mevcut alanları okur, yeni bir alan İCAT
+-- EDİLMEZ):
+--   - Silah: metadata.weapon_serial, Config.Forensics.Frisk.
+--     WeaponSerialContrabandPrefix ('BM-') ile başlıyorsa -- server/
+--     blackmarket.lua Matrix.BlackMarket.GenerateWeaponSerial İLE AYNI format.
+--   - Açık Hat (burner phone): metadata.imei_masked + metadata.acquired_at
+--     (server/blackmarket.lua bu satırda [KATMAN 7 FAZ 2] eklendi), tutma
+--     süresi BurnerPhoneMaxHoldSeconds'ı aşıyorsa.
+--   - Uyuşturucu: metadata.purity, Config.Market.GourmetMinPurity (MEVCUT,
+--     DEĞİŞTİRİLMEDİ) altındaysa -- server/kitchen.lua Matrix.Kitchen.
+--     PackageBatch'in ürettiği meth_bag/coke_brick.
+--   - Araç: Matrix.Fleet.GetVehicle(plate).vin_status == 'scratched' (veya
+--     verified_stolen_plate) -- server/logistics.lua, DEĞİŞTİRİLMEDİ.
+--
+-- El koyma, MEVCUT üç fonksiyonu yeniden kullanır (YENİ bir el koyma
+-- formülü İCAT EDİLMEZ): ox_inventory:RemoveItem (silah/telefon/uyuşturucu),
+-- Matrix.Forensics.WipeBallisticRecord (silah balistik kaydı, yukarıda,
+-- DEĞİŞTİRİLMEDİ), Matrix.Fleet.SeizeVehicle (araç, server/logistics.lua,
+-- DEĞİŞTİRİLMEDİ). Bulgu varsa, "delil indeksi zıplaması"
+-- Matrix.Bureau.AdvanceDecryption'a (MEVCUT deşifre motoru, DEĞİŞTİRİLMEDİ)
+-- Config.Forensics.Frisk.EvidenceIndexJumpRatio (%20) sabit kazancıyla
+-- yansıtılır -- yeni bir ihbar tablosu İCAT EDİLMEZ.
+--
+-- SIFIR RNG: tüm eşikler sabit karşılaştırmalardır. 0 RESMON: oyuncu
+-- tarama thread'i main.lua/market.lua'nın polis-önbelleği İLE AYNI 5sn
+-- yenileme + 1sn dwell-poll disiplinini izler (Wait(0) YOK).
+-- =====================================================================
+local function IsPackagedProduct(itemName)
+    for _, product in ipairs(Config.Kitchen.Packaging.Products) do
+        if product.item == itemName then return true end
+    end
+    return false
+end
+
+
+local function ScanInventoryContraband(inventoryId)
+    local findings = {}
+    local invOk, inv = pcall(function() return exports['ox_inventory']:GetInventory(inventoryId) end)
+    if not invOk or type(inv) ~= 'table' or type(inv.items) ~= 'table' then return findings end
+
+
+    local now = Matrix.Now()
+    for slot, item in pairs(inv.items) do
+        if type(item) == 'table' and type(item.name) == 'string' then
+            local meta = item.metadata or {}
+            if type(meta.weapon_serial) == 'string'
+                and meta.weapon_serial:sub(1, #Config.Forensics.Frisk.WeaponSerialContrabandPrefix) == Config.Forensics.Frisk.WeaponSerialContrabandPrefix then
+                findings[#findings + 1] = { kind = 'weapon', slot = slot, item = item.name, count = tonumber(item.count) or 1, serial = meta.weapon_serial }
+            elseif meta.imei_masked == true and type(meta.acquired_at) == 'number'
+                and (now - meta.acquired_at) > Config.Forensics.Frisk.BurnerPhoneMaxHoldSeconds then
+                findings[#findings + 1] = { kind = 'burner_phone', slot = slot, item = item.name, count = tonumber(item.count) or 1 }
+            elseif IsPackagedProduct(item.name) and type(meta.purity) == 'number'
+                and meta.purity < Config.Market.GourmetMinPurity then
+                findings[#findings + 1] = { kind = 'drugs', slot = slot, item = item.name, count = tonumber(item.count) or 1 }
+            end
+        end
+    end
+    return findings
+end
+
+
+local function SeizeContraband(inventoryId, finding, dnaId)
+    if finding.kind == 'vehicle' then
+        pcall(function() Matrix.Fleet.SeizeVehicle(finding.plate, 'frisk_search', dnaId, nil) end)
+        return
+    end
+
+
+    pcall(function()
+        exports['ox_inventory']:RemoveItem(inventoryId, finding.item, finding.count, nil, finding.slot)
+    end)
+
+
+    if finding.kind == 'weapon' and Matrix.Forensics.WipeBallisticRecord then
+        Matrix.Forensics.WipeBallisticRecord(finding.serial)
+    end
+end
+
+
+local function FindNearestTrapHouseForFrisk(coords)
+    local nearestId, nearestDist = nil, math.huge
+    for id, house in pairs(Matrix.TrapHouses or {}) do
+        local d = #(coords - house.coords)
+        if d < nearestDist then nearestId, nearestDist = id, d end
+    end
+    return nearestId
+end
+
+
+-- ★ Bota kalıcı atanmış aracın plakası (varsa) da taranır -- server/
+-- logistics.lua Matrix.Fleet.GetVehicleByBot'a İHTİYAÇ YOKTUR: main.lua
+-- dispatch'in KENDİ dispatch.plate alanı zaten doğrudan parametre olarak
+-- gelir (bkz. main.lua dosya başı FAZ 2 notu).
+function Matrix.Forensics.InspectBustedBot(botId, trapHouseId, plate)
+    local bot = Matrix.Bots[botId]
+    if not bot then return false end
+
+
+    local inventoryId = ('dealer_%d'):format(botId)
+    local findings = ScanInventoryContraband(inventoryId)
+
+
+    if type(plate) == 'string' and plate ~= '' then
+        local vehicle = Matrix.Fleet and Matrix.Fleet.GetVehicle and Matrix.Fleet.GetVehicle(plate)
+        if vehicle and (vehicle.vin_status == 'scratched' or vehicle.verified_stolen_plate) then
+            findings[#findings + 1] = { kind = 'vehicle', plate = plate }
+        end
+    end
+
+
+    if #findings == 0 then return false end
+
 
     for _, finding in ipairs(findings) do
-        if finding.kind == 'vehicle' then
-            Matrix.Bureau.SeizeVehicle(finding.plate, finding.netId, 'scratched_plate')
-        elseif finding.kind == 'weapon' then
-            removeFromInventory(targetInv, finding.item, 1)
-            Matrix.Bureau.WipeBallisticRecord(finding.serial)
-        elseif finding.kind == 'burner_phone' then
-            removeFromInventory(targetInv, finding.item, 1, finding.metadata)
-        elseif finding.kind == 'drugs' then
-            removeFromInventory(targetInv, finding.item, finding.count or 1, finding.metadata)
-        end
+        SeizeContraband(inventoryId, finding, bot.dna_id)
     end
 
-    if isBot and Matrix.Market and Matrix.Market.SeizeBotCash then
-        pcall(Matrix.Market.SeizeBotCash, suspectKey)
+
+    if trapHouseId and Matrix.Bureau and Matrix.Bureau.AdvanceDecryption then
+        Matrix.Bureau.AdvanceDecryption(trapHouseId, Config.Forensics.Frisk.EvidenceIndexJumpRatio)
     end
 
-    Matrix.Log('FORENSICS', 'BUSTED %s: %d contraband item(s) found', tostring(suspectKey), #findings)
 
-    if officerSource then
-        TriggerClientEvent('matrix:client:hud:friskResult', officerSource, suspectKey, true, findings)
-    end
-    if not isBot and type(suspectKey) == 'number' then
-        TriggerClientEvent('matrix:client:hud:searched', suspectKey, findings)
-    end
+    Matrix.Log('FORENSICS', '[UST ARAMA] Bot #%d yakalandi: %d kontrabant bulundu, delil indeksi %.2f ziladi.',
+        botId, #findings, Config.Forensics.Frisk.EvidenceIndexJumpRatio)
+    return true
 end
 
--- ---------------------------------------------------------------------
--- Main sweep - dwell counters per suspect, cooldown after a search.
--- ---------------------------------------------------------------------
-local function sweepOnce()
-    local officers = getOnDutyOfficers()
-    if #officers == 0 then return end
 
-    local now = os_time()
-    local seenThisTick = {}
+function Matrix.Forensics.InspectPlayer(officerSrc, suspectSrc)
+    -- ★ Bu dosyanın KENDİ konvansiyonu (bkz. /silahasindir yukarıda): oyuncu
+    -- envanteri ox_inventory köprüsünde string olarak ele alınır.
+    local inventoryId = tostring(suspectSrc)
+    local findings = ScanInventoryContraband(inventoryId)
 
-    for _, source in ipairs(GetPlayers()) do
-        source = tonumber(source)
-        local isOfficer = false
-        for _, officer in ipairs(officers) do
-            if officer.source == source then isOfficer = true break end
-        end
 
-        if not isOfficer then
-            local ped = GetPlayerPed(source)
-            local coords = GetEntityCoords(ped)
-            local dist, officerSource = nearestOfficerDistance(coords, officers)
-            seenThisTick[source] = true
-
-            if dist <= Config.Forensics.FriskRadius then
-                dwellTimers[source] = (dwellTimers[source] or 0) + Config.Forensics.TickIntervalMs
-                local onCooldown = searchCooldowns[source] and (now - searchCooldowns[source]) * 1000 < Config.Forensics.FriskCooldownMs
-                if dwellTimers[source] >= Config.Forensics.FriskDwellMs and not onCooldown then
-                    dwellTimers[source] = 0
-                    searchCooldowns[source] = now
-                    performForensicSearch(source, source, ped, tostring(source), false, officerSource)
-                end
-            else
-                dwellTimers[source] = 0
+    local ped = GetPlayerPed(suspectSrc)
+    if ped and ped ~= 0 then
+        local okVeh, veh = pcall(function() return GetVehiclePedIsIn(ped, false) end)
+        if okVeh and veh and veh ~= 0 then
+            local okPlate, plate = pcall(function() return GetVehicleNumberPlateText(veh) end)
+            plate = (okPlate and type(plate) == 'string') and plate:gsub('%s+$', '') or nil
+            local vehicle = plate and Matrix.Fleet and Matrix.Fleet.GetVehicle and Matrix.Fleet.GetVehicle(plate)
+            if vehicle and (vehicle.vin_status == 'scratched' or vehicle.verified_stolen_plate) then
+                findings[#findings + 1] = { kind = 'vehicle', plate = plate }
             end
         end
     end
 
-    for source in pairs(dwellTimers) do
-        if not seenThisTick[source] then dwellTimers[source] = nil end
+
+    if #findings == 0 then
+        Reply(officerSrc, 'Ust arama tamamlandi: kontrabant bulunamadi.')
+        return false
     end
 
-    for botId, bot in pairs(Matrix.Forensics.BotPeds) do
-        local ok, ped = pcall(NetworkGetEntityFromNetworkId, bot.netId)
-        if ok and ped and ped ~= 0 then
-            local coords = GetEntityCoords(ped)
-            local dist, officerSource = nearestOfficerDistance(coords, officers)
-            local key = 'bot:' .. tostring(botId)
 
-            if dist <= Config.Forensics.FriskRadius then
-                dwellTimers[key] = (dwellTimers[key] or 0) + Config.Forensics.TickIntervalMs
-                local onCooldown = searchCooldowns[key] and (now - searchCooldowns[key]) * 1000 < Config.Forensics.FriskCooldownMs
-                if dwellTimers[key] >= Config.Forensics.FriskDwellMs and not onCooldown then
-                    dwellTimers[key] = 0
-                    searchCooldowns[key] = now
-                    local trunkInv = Matrix.Logistics and Matrix.Logistics.BotVehicles[botId]
-                        and (Config.Logistics.Trunk.StashPrefix .. Matrix.Logistics.BotVehicles[botId].plate)
-                    performForensicSearch(botId, trunkInv, ped, bot.ownerId, true, officerSource)
-                end
-            else
-                dwellTimers[key] = 0
+    local actor = Matrix.ResolveActor({ kind = 'player', source = suspectSrc })
+    local dnaId = (actor and actor.dna_id) or 'UNKNOWN'
+    for _, finding in ipairs(findings) do
+        SeizeContraband(inventoryId, finding, dnaId)
+    end
+
+
+    local coords = ped and ped ~= 0 and GetEntityCoords(ped) or nil
+    local trapHouseId = coords and FindNearestTrapHouseForFrisk(coords)
+    if trapHouseId and Matrix.Bureau and Matrix.Bureau.AdvanceDecryption then
+        Matrix.Bureau.AdvanceDecryption(trapHouseId, Config.Forensics.Frisk.EvidenceIndexJumpRatio)
+    end
+
+
+    Reply(officerSrc, ('Ust arama tamamlandi: %d kontrabant el konuldu.'):format(#findings))
+    TriggerClientEvent('chat:addMessage', suspectSrc, { args = { '[UST ARAMA]', ('%d esyaniza el konuldu.'):format(#findings) } })
+    Matrix.Log('FORENSICS', '[UST ARAMA] Memur #%d, supheli #%d: %d kontrabant bulundu.', officerSrc, suspectSrc, #findings)
+    return true
+end
+
+
+-- ★ main.lua'nın RefreshPoliceCache/PoliceSources İLE AYNI desen -- dosya-
+-- yerel kopya, mevcut kod tabanının kendi konvansiyonu (bkz. bureau.lua/
+-- logistics.lua'daki FindNearestTrapHouse/HasCommandAuthority kopyaları).
+local FriskPoliceSources        = {}
+local friskPoliceFailCount      = 0
+local friskPoliceDisabledUntil  = 0
+
+
+local function RefreshFriskPoliceCache()
+    if Matrix.Now() < friskPoliceDisabledUntil then return end
+
+
+    local ok, players = pcall(function() return Matrix.QBX:GetQBPlayers() end)
+    if not ok or type(players) ~= 'table' then
+        friskPoliceFailCount = friskPoliceFailCount + 1
+        if friskPoliceFailCount >= 5 then
+            friskPoliceDisabledUntil = Matrix.Now() + 60
+            friskPoliceFailCount = 0
+            Matrix.Log('FORENSICS', '[UYARI] GetQBPlayers 5 kez ust uste basarisiz oldu; 60sn devre disi birakildi.')
+        end
+        return
+    end
+    friskPoliceFailCount = 0
+
+
+    local fresh = {}
+    for src, player in pairs(players) do
+        if player and player.PlayerData and player.PlayerData.job then
+            local job = player.PlayerData.job
+            if job.onduty and (job.name == 'police' or job.name == 'sheriff' or job.type == 'leo') then
+                fresh[src] = true
             end
         end
     end
+    FriskPoliceSources = fresh
 end
+
 
 CreateThread(function()
     while true do
-        Wait(Config.Forensics.TickIntervalMs)
-        local ok, err = pcall(sweepOnce)
-        if not ok then
-            Matrix.Log('FORENSICS', 'sweep error: %s', tostring(err))
-        end
+        Wait(5000)
+        RefreshFriskPoliceCache()
     end
 end)
 
--- ---------------------------------------------------------------------
--- Manual trigger for admin/GM use or a client-side "target" interaction
--- (e.g. an officer manually frisking a nearby suspect on demand).
--- ---------------------------------------------------------------------
-RegisterNetEvent('matrix:server:forensics:manualFrisk', function(targetServerId)
-    local source = source
-    local ok = pcall(function()
-        local QBCore = exports[Config.Core.Resource]:GetCoreObject()
-        local ply = QBCore.Functions.GetPlayer(source)
-        return ply and ply.PlayerData.job.name == Config.Forensics.PoliceJob and ply.PlayerData.job.onduty
-    end)
-    if not ok then return end
 
-    local ped = GetPlayerPed(targetServerId)
-    if not ped or ped == 0 then return end
-    performForensicSearch(targetServerId, targetServerId, ped, tostring(targetServerId), false, source)
+local FriskDwellMs       = {}   -- 'officerSrc#suspectSrc' -> birikmis ms
+local FriskCooldownUntil = {}   -- suspectSrc -> epoch saniye
+
+
+-- ★ 0 RESMON: Wait(0) YOK -- 1sn poll main.lua'nın master ticker'ından
+-- BAĞIMSIZ, kendi thread'inde. DwellMs (6000) bu 1000ms adımlarla birikir.
+CreateThread(function()
+    while true do
+        Wait(1000)
+
+
+        local now = Matrix.Now()
+        local activePairs = {}
+
+
+        for officerSrc in pairs(FriskPoliceSources) do
+            local officerPed = GetPlayerPed(officerSrc)
+            if officerPed and officerPed ~= 0 then
+                local officerCoords = GetEntityCoords(officerPed)
+
+
+                for _, suspectSrcStr in ipairs(GetPlayers()) do
+                    local suspectSrc = tonumber(suspectSrcStr)
+                    if suspectSrc and suspectSrc ~= officerSrc and not FriskPoliceSources[suspectSrc] then
+                        local suspectPed = GetPlayerPed(suspectSrc)
+                        if suspectPed and suspectPed ~= 0 and (FriskCooldownUntil[suspectSrc] or 0) <= now then
+                            local suspectCoords = GetEntityCoords(suspectPed)
+                            if #(officerCoords - suspectCoords) <= Config.Forensics.Frisk.Radius then
+                                local pairKey = officerSrc .. '#' .. suspectSrc
+                                activePairs[pairKey] = true
+                                FriskDwellMs[pairKey] = (FriskDwellMs[pairKey] or 0) + 1000
+
+
+                                if FriskDwellMs[pairKey] >= Config.Forensics.Frisk.DwellMs then
+                                    FriskDwellMs[pairKey] = nil
+                                    FriskCooldownUntil[suspectSrc] = now + math.floor(Config.Forensics.Frisk.CooldownMs / 1000)
+
+
+                                    local ok, err = pcall(Matrix.Forensics.InspectPlayer, officerSrc, suspectSrc)
+                                    if not ok then
+                                        Matrix.Log('FORENSICS', '[HATA] InspectPlayer hata verdi (yutuldu): %s', tostring(err))
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+
+        for key in pairs(FriskDwellMs) do
+            if not activePairs[key] then FriskDwellMs[key] = nil end
+        end
+    end
 end)
-
-Matrix.Log('FORENSICS', 'server/forensics.lua loaded (Faz 2 - Frisk/Seizure)')
