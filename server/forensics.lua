@@ -1157,6 +1157,11 @@ local function IsPackagedProduct(itemName)
 end
 
 
+-- ★ [MADDE 5b] Her bulguya KENDİ kaynak envanterini (inventory_id) damgalar
+-- -- InspectPlayer/InspectBustedBot artık İKİ ayrı envanteri (üst/kişisel +
+-- bagaj) TEK bir findings listesinde birleştirebiliyor (bkz. aşağıda),
+-- SeizeContraband bu yüzden inventoryId'yi ayrı parametre olarak DEĞİL,
+-- finding'in kendisinden okur.
 local function ScanInventoryContraband(inventoryId)
     local findings = {}
     local invOk, inv = pcall(function() return exports['ox_inventory']:GetInventory(inventoryId) end)
@@ -1169,13 +1174,13 @@ local function ScanInventoryContraband(inventoryId)
             local meta = item.metadata or {}
             if type(meta.weapon_serial) == 'string'
                 and meta.weapon_serial:sub(1, #Config.Forensics.Frisk.WeaponSerialContrabandPrefix) == Config.Forensics.Frisk.WeaponSerialContrabandPrefix then
-                findings[#findings + 1] = { kind = 'weapon', slot = slot, item = item.name, count = tonumber(item.count) or 1, serial = meta.weapon_serial }
+                findings[#findings + 1] = { kind = 'weapon', inventory_id = inventoryId, slot = slot, item = item.name, count = tonumber(item.count) or 1, serial = meta.weapon_serial }
             elseif meta.imei_masked == true and type(meta.acquired_at) == 'number'
                 and (now - meta.acquired_at) > Config.Forensics.Frisk.BurnerPhoneMaxHoldSeconds then
-                findings[#findings + 1] = { kind = 'burner_phone', slot = slot, item = item.name, count = tonumber(item.count) or 1 }
+                findings[#findings + 1] = { kind = 'burner_phone', inventory_id = inventoryId, slot = slot, item = item.name, count = tonumber(item.count) or 1 }
             elseif IsPackagedProduct(item.name) and type(meta.purity) == 'number'
                 and meta.purity < Config.Market.GourmetMinPurity then
-                findings[#findings + 1] = { kind = 'drugs', slot = slot, item = item.name, count = tonumber(item.count) or 1 }
+                findings[#findings + 1] = { kind = 'drugs', inventory_id = inventoryId, slot = slot, item = item.name, count = tonumber(item.count) or 1 }
             end
         end
     end
@@ -1183,7 +1188,29 @@ local function ScanInventoryContraband(inventoryId)
 end
 
 
-local function SeizeContraband(inventoryId, finding, dnaId)
+-- ★ [MADDE 5b] BAGAJ RÖNTGENİ: server/logistics.lua'nın bota KALICI atanmış
+-- aracın bagajı için AÇTIĞI AYNI ox_inventory stash'i (Config.Logistics.
+-- TrunkOps.StashPrefix .. plaka, DEĞİŞTİRİLMEDİ) — ikinci bir bagaj sistemi
+-- İCAT EDİLMEZ. RegisterStash, GetInventory'den ÖNCE tekrar çağrılır (best-
+-- effort/pcall) çünkü bagaj bu oturumda hiç kullanılmamışsa ox_inventory'nin
+-- stash'i henüz tanımıyor olabilir — logistics.lua'nın kendi yazma yolundaki
+-- İLE AYNI disiplin. Plaka Matrix.Fleet'e kayıtlı DEĞİLSE (oyuncunun kendi
+-- özel aracı vb.) hiçbir şey taranmaz -- bu sistem yalnızca filo/kurye
+-- araçlarının bagajından sorumludur.
+local function ScanTrunkContraband(plate)
+    if type(plate) ~= 'string' or plate == '' then return {} end
+    if not (Matrix.Fleet and Matrix.Fleet.GetVehicle and Matrix.Fleet.GetVehicle(plate)) then return {} end
+
+    local trunkId = Config.Logistics.TrunkOps.StashPrefix .. plate
+    pcall(function()
+        exports['ox_inventory']:RegisterStash(trunkId, ('%s Bagaji'):format(plate),
+            Config.Logistics.TrunkOps.Slots, Config.Logistics.TrunkOps.MaxWeight)
+    end)
+    return ScanInventoryContraband(trunkId)
+end
+
+
+local function SeizeContraband(finding, dnaId)
     if finding.kind == 'vehicle' then
         pcall(function() Matrix.Fleet.SeizeVehicle(finding.plate, 'frisk_search', dnaId, nil) end)
         return
@@ -1191,7 +1218,7 @@ local function SeizeContraband(inventoryId, finding, dnaId)
 
 
     pcall(function()
-        exports['ox_inventory']:RemoveItem(inventoryId, finding.item, finding.count, nil, finding.slot)
+        exports['ox_inventory']:RemoveItem(finding.inventory_id, finding.item, finding.count, nil, finding.slot)
     end)
 
 
@@ -1229,6 +1256,12 @@ function Matrix.Forensics.InspectBustedBot(botId, trapHouseId, plate)
         if vehicle and (vehicle.vin_status == 'scratched' or vehicle.verified_stolen_plate) then
             findings[#findings + 1] = { kind = 'vehicle', plate = plate }
         end
+
+        -- ★ [MADDE 5b] BAGAJ RÖNTGENİ: dealer_<botId> ÜZERİNDEKİ envanterden
+        -- AYRI, aracın kendi bagaj stash'i.
+        for _, trunkFinding in ipairs(ScanTrunkContraband(plate)) do
+            findings[#findings + 1] = trunkFinding
+        end
     end
 
 
@@ -1236,7 +1269,7 @@ function Matrix.Forensics.InspectBustedBot(botId, trapHouseId, plate)
 
 
     for _, finding in ipairs(findings) do
-        SeizeContraband(inventoryId, finding, bot.dna_id)
+        SeizeContraband(finding, bot.dna_id)
     end
 
 
@@ -1268,6 +1301,14 @@ function Matrix.Forensics.InspectPlayer(officerSrc, suspectSrc)
             if vehicle and (vehicle.vin_status == 'scratched' or vehicle.verified_stolen_plate) then
                 findings[#findings + 1] = { kind = 'vehicle', plate = plate }
             end
+
+            -- ★ [MADDE 5b] BAGAJ RÖNTGENİ: oyuncunun İÇİNDE OLDUĞU aracın
+            -- bagajı da (filo/kurye aracıysa) üst aramayla AYNI anda taranır.
+            if vehicle then
+                for _, trunkFinding in ipairs(ScanTrunkContraband(plate)) do
+                    findings[#findings + 1] = trunkFinding
+                end
+            end
         end
     end
 
@@ -1281,7 +1322,7 @@ function Matrix.Forensics.InspectPlayer(officerSrc, suspectSrc)
     local actor = Matrix.ResolveActor({ kind = 'player', source = suspectSrc })
     local dnaId = (actor and actor.dna_id) or 'UNKNOWN'
     for _, finding in ipairs(findings) do
-        SeizeContraband(inventoryId, finding, dnaId)
+        SeizeContraband(finding, dnaId)
     end
 
 
