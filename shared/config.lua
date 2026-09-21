@@ -768,6 +768,19 @@ Config.Bureau.LockdownPurityWeight      = 0.30
 -- AYNI felsefe) learning-core sayaçları da soğur — ayrı bir sabit İCAT
 -- EDİLMEZ, mevcut decay katsayısı yeniden kullanılır.
 
+-- [T4 KÖPRÜ] CANLI YAYIN -> radio_breach_count (bkz. server/bureau.lua
+-- Matrix.Bureau.RecordLivestreamRadioLeak). LivestreamHeatIncrementPerTick
+-- İLE AYNI "gerçek süreden türet" deseni: sabit bir hızı elle YAZMAK
+-- yerine, "sürekli + açık hat + çarpanlı yayın TEK BAŞINA LockdownBreach
+-- Ceiling'i kaç dakikada doyurur" sorusuna cevap veriliyor, oran
+-- buradan türetiliyor. LockdownBreachCeiling'e bağımlı olduğu için bu
+-- satırlar ondan SONRA gelir (Lua dosyaları yukarıdan aşağı çalışır).
+Config.Bureau.LivestreamRadioBreachMultiplier       = 3.0   -- talep: "X3 çarpanla üssel tırmanma"
+Config.Bureau.LivestreamFullBreachCeilingRealMinutes = 10.0 -- sürekli+açık hat+çarpanlı yayın, LockdownBreachCeiling'i kaç dakikada TEK BAŞINA doyurur
+Config.Bureau.LivestreamRadioLeakPerTick =
+    Config.Bureau.LockdownBreachCeiling /
+    (Config.Bureau.LivestreamFullBreachCeilingRealMinutes * 60.0 * Config.Bureau.LivestreamRadioBreachMultiplier)
+
 -- [T4-2] TOPLU SATIŞ HUB'LARI (District Distribution Hubs) — F10 ile
 -- kritik kavşaklara atanan, trap house'un ortak deposundan (matrix_trap_
 -- stash_<id>) sabit miktarlı/RNG'siz toplu satış döngüsü yürüten düğümler.

@@ -676,6 +676,14 @@ CreateThread(function()
 
 
                         Matrix.Bureau.AdvanceDecryption(trapHouseId, Config.Bureau.LivestreamDecryptionGainPerTick * cyberSkill)
+
+                        -- ★ [T4 KÖPRÜ] Ayni "acik hat" pencerisi (silent
+                        -- degilken) T4 Buro Kilidi ogrenme cekirdegini de
+                        -- besler -- bkz. RecordLivestreamRadioLeak yorumu.
+                        -- /sessizlik aktifken bu blok HIC calismaz, yani
+                        -- radyo sessizligi livestream sizintisini da
+                        -- KESER (cyberLeakHeatmap ile AYNI disiplin).
+                        Matrix.Bureau.RecordLivestreamRadioLeak(trapHouseId, Config.Bureau.LivestreamRadioBreachMultiplier)
                     end
                 end
             end
@@ -1291,6 +1299,15 @@ local function EvaluateLockdown(trapHouseId)
 end
 
 
+local function MarkLearningZone(state, label)
+    local zones = state.frequent_zones
+    for i = 1, #zones do
+        if zones[i] == label then return end
+    end
+    zones[#zones + 1] = label
+end
+
+
 -- Her gerçek üçgenleme isabetinde Matrix.Bureau.OnUnencryptedComms
 -- tarafından çağrılır (bkz. dosya başındaki tek satırlık hook).
 function Matrix.Bureau.RecordRadioBreach(trapHouseId)
@@ -1299,13 +1316,42 @@ function Matrix.Bureau.RecordRadioBreach(trapHouseId)
 
     local state = GetLearningState(trapHouseId)
     state.radio_breach_count = state.radio_breach_count + 1
+    MarkLearningZone(state, house.label)
 
-    local zones = state.frequent_zones
-    local known = false
-    for i = 1, #zones do
-        if zones[i] == house.label then known = true break end
-    end
-    if not known then zones[#zones + 1] = house.label end
+    dirtyLearningCore[trapHouseId] = true
+    EvaluateLockdown(trapHouseId)
+end
+
+
+-- ★★★ [T4 KÖPRÜ] CANLI YAYIN -> radio_breach_count (talep: "X3 çarpanla
+-- üssel tırmanma, doğrudan besleme, deterministik %75 tetik") ★★★
+-- RecordRadioBreach (üstte) GERÇEK bir üçgenleme isabetinde +1 TAM SAYI
+-- yazar. Canlı yayın ise SÜREKLİ bir olaydır (StartLivestream tick'i,
+-- her saniye) — saniyede +3 TAM SAYI yazmak "üssel tırmanma" değil ANLIK
+-- patlama (12 saniyede LockdownBreachCeiling'e doyar) olurdu. Bunun
+-- yerine KESİRLİ bir biriktirici kullanılır: her tick
+-- LivestreamRadioLeakPerTick * multiplier kadar birikir, biriken değer
+-- 1.0'ı her geçtiğinde radio_breach_count'a TAM SAYI bir birim düşer.
+-- Sonuç AYNI sayaç, AYNI ComputeLockdownCoefficient/EvaluateLockdown
+-- (DEĞİŞTİRİLMEDİ) — yeni bir eşik/formül İCAT EDİLMEZ.
+-- SIFIR RNG: aynı süre + aynı multiplier HER ZAMAN aynı sayıda sentetik
+-- ihlal üretir. Biriktirici DB'ye YAZILMAZ (yalnızca radio_breach_count
+-- yazılır, bkz. FlushDirtyLearningCore) — sunucu yeniden başlarsa en
+-- fazla <1 birimlik kesir kaybolur, dengeyi etkilemez.
+function Matrix.Bureau.RecordLivestreamRadioLeak(trapHouseId, multiplier)
+    local house = Matrix.TrapHouses[trapHouseId]
+    if not house then return end
+
+    local state = GetLearningState(trapHouseId)
+    state.livestream_leak_accumulator = (state.livestream_leak_accumulator or 0.0)
+        + (Config.Bureau.LivestreamRadioLeakPerTick * (multiplier or 1.0))
+
+    local wholeBreaches = math_floor(state.livestream_leak_accumulator)
+    if wholeBreaches < 1 then return end
+
+    state.livestream_leak_accumulator = state.livestream_leak_accumulator - wholeBreaches
+    state.radio_breach_count = state.radio_breach_count + wholeBreaches
+    MarkLearningZone(state, house.label)
 
     dirtyLearningCore[trapHouseId] = true
     EvaluateLockdown(trapHouseId)
