@@ -13,7 +13,10 @@ shared_scripts {
 
 client_scripts {
     'client/hud.lua',
-    'client/trap_house_client.lua'
+    'client/trap_house_client.lua',
+    -- ★ Bestecinin İmzası: spawn-sonrası monokrom taktik bülten + opsiyonel
+    -- Bach ses katmanı (bkz. shared/config.lua Config.ComposerSignature).
+    'client/composer_intro.lua'
 }
 
 server_scripts {
@@ -30,7 +33,23 @@ server_scripts {
     'server/rendezvous.lua',
     'server/trap_house_interior.lua',
     'server/workbench.lua',
-    'server/door_reinforcement.lua'
+    'server/door_reinforcement.lua',
+    -- ★ Otomasyonlu Regresyon Çekirdeği: diğer TÜM server dosyalarının
+    -- Matrix.* kancalarını okuduğu için listenin EN SONUNDA (yalnızca
+    -- okunabilirlik için -- kontroller run-time'da çalıştığından, o ana
+    -- kadar her dosya zaten tam yüklenmiş olur, sıra fonksiyonel olarak
+    -- kritik değildir).
+    'server/matrix_diagnostics.lua'
+}
+
+-- ★ Bestecinin İmzası ses dosyaları: bu repoda YOK (bkz. shared/config.lua
+-- Config.ComposerSignature yorumu). Gerçek .ogg dosyalarınızı BURAYA
+-- (resource kökünde 'sounds/') koyduğunuzda FiveM'in NUI köprüsü
+-- (client/composer_intro.lua'nın cfx-nui-<resource>/... isteği) onları
+-- servis edebilsin diye önceden bildiriliyor -- dosyalar yokken bu satır
+-- zararsızdır (yalnızca "yayınlanabilir" bir yol listeler).
+files {
+    'sounds/*.ogg'
 }
 
 dependencies {
@@ -41,6 +60,13 @@ dependencies {
     -- ★ KATMAN 7 [T4] FAZ 3: sokak "keş" NPC'sinde "Kadroya Kat (Ajan
     -- Devşir)" etkileşim seçeneği (client/hud.lua SpawnStreetNpc) için.
     'ox_target',
+    -- ★ Bestecinin İmzası: özel .ogg dosyalarını (Config.ComposerSignature)
+    -- çalmak için -- DOĞRULANMASI GEREKİR: xsound'un export imzası forka
+    -- göre değişebilir, client/composer_intro.lua PlayUrl/Destroy'u
+    -- pcall içinde çağırır (yanlış imza -> sessizce ses çalmaz, ÇÖKMEZ).
+    -- Kurulum: https://github.com/Xanthenite/xsound -> resources/ klasörüne
+    -- çıkarıp server.cfg'ye "start xsound" ekleyin.
+    'xsound',
     -- ★ KATMAN 6: Trap house iç mekanı (client/trap_house_client.lua)
     -- GTA Online "düşük gelirli ev" interior'ını doğru render etmek için
     -- bu kaynağı kullanır (bkz. shared/config.lua Config.TrapHouseInterior.

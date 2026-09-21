@@ -901,4 +901,48 @@ Config.Recruitment.MomentumQualityCeiling      = 1.6
 Config.Recruitment.BaseCandidateResilience     = 0.35
 Config.Recruitment.BaseCandidateSnitchTendency = 0.35
 
+-- =====================================================================
+-- OTOMASYONLU REGRESYON ÇEKİRDEĞİ (server/matrix_diagnostics.lua)
+-- Hızlı katman (config sınırları + Matrix.* kanca varlığı + salt-okunur
+-- DB şeması) onServerResourceStart'ta OTOMATİK, /matrix_run_diagnostics
+-- ile MANUEL çalışır — milisaniyeler içinde biter, SIFIR yan etki.
+-- DeepModeCommandArg YALNIZCA elle '/matrix_run_diagnostics deep' ile
+-- gerçek bir kullan-at test botu doğurup İki-Fazlı Çıkış Köprüsü'nü
+-- uçtan uca kanıtlar, ardından TAMAMEN geri alır — ASLA otomatik değildir
+-- (bkz. dosya başı KAPSAM KARARI yorumu).
+-- =====================================================================
+Config.Diagnostics = {
+    RunOnResourceStart = true,
+    DeepModeCommandArg = 'deep'
+}
+
+-- =====================================================================
+-- BESTECİNİN İMZASI (client/composer_intro.lua) — oyuncu spawn olduğunda,
+-- kontrolü eline almadan ÖNCE gösterilen monokrom taktik bülten + opsiyonel
+-- Bach "Yengeç Kanonu" (BWV 1079) ses katmanı.
+--
+-- ★ SES DOSYALARI BU REPODA YOK: gerçek bir kayıt/render telif/lisans
+-- gerektirir ve bu ortamda ses sentezleme/ikili indirme aracı YOKTUR —
+-- guideVoiceFile/counterpointVoiceFile'ı (kendi lisanslı/PD .ogg
+-- dosyalarınızla) resource kökünde 'sounds/' altına SİZİN koymanız
+-- gerekir. Dosyalar yoksa xsound çağrısı pcall içinde sessizce başarısız
+-- olur — script ÇÖKMEZ, yalnızca ses çalmaz; monokrom bülten + zamanlayıcı
+-- ETKİLENMEDEN çalışmaya devam eder.
+--
+-- introDurationMs SABİTTİR: ses/xsound ne yaparsa yapsın (susarsa, dosya
+-- eksikse, xsound hiç yüklü değilse) oyuncunun kontrolü bu sürenin
+-- SONUNDA KOŞULSUZ geri verilir — bir ses hatasının oyuncuyu kalıcı
+-- kara ekranda kilitlemesi YAPISAL OLARAK imkansızdır.
+-- =====================================================================
+Config.ComposerSignature = {
+    playAudioOnLoad        = true,
+    volume                 = 0.45,
+    guideVoiceFile         = 'sounds/crab_canon_guide.ogg',
+    counterpointVoiceFile  = 'sounds/crab_canon_counterpoint.ogg',
+    introDurationMs        = 8000, -- toplam sabit sure -- HER ZAMAN bu sürede biter
+    counterpointLeadMs     = 2500, -- introDurationMs'in SON bu kadarlik dilimi (sadece rapor 'sealed' ise)
+    bulletinLineIntervalMs = 220,  -- taktik bulten satirlarinin akma hizi
+    fadeOutMs              = 600   -- introDurationMs'in SON bu kadarlik dilimi: alfa 235'ten 0'a lineer iner
+}
+
 return Config
