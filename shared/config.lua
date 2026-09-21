@@ -353,6 +353,22 @@ Config.RadioSilence = {
 }
 
 
+-- ---------------------------------------------------------------------
+-- ★ KATMAN 7 [T3]: SESSİZLİK İHLALİ CEZA KATSAYILARI
+-- Yolda seyir halindeki (aktif dispatch) bir bota, dispatcher /sessizlik
+-- altındayken telsizden müdahale edilirse (bkz. server/main.lua
+-- Matrix.TriggerPanicEvacuation -> server/market.lua Matrix.RadioSilence.
+-- BreakForRedirect) statik parazit şiddeti VE Büro'nun ilgili trap house
+-- decryption_confidence'ı (Matrix.Bureau.AdvanceDecryption) BU İKİ TABANDAN
+-- BreakGeometricFactor üssel katsayısıyla büyür — art arda ihlaller
+-- katlanarak daha pahalıya patlar. Sayaç /sessizlik yeniden başlatıldığında
+-- sıfırlanır (bkz. server/market.lua Matrix.RadioSilence.Start).
+-- ---------------------------------------------------------------------
+Config.RadioSilence.BreakBaseStatic         = 0.35
+Config.RadioSilence.BreakBaseDecryptionGain = 0.05
+Config.RadioSilence.BreakGeometricFactor    = 1.75
+
+
 Config.CashDecay = {
     TraceHalfLifeRealDays         = 90.0,
     RaidRiskMultiplierAtMaxTrace  = 2.0,
@@ -431,6 +447,24 @@ Config.Hud = {
 -- stash teslimatı için "varış" sayılacak yarıçap (metre).
 -- ---------------------------------------------------------------------
 Config.Logistics.TrapHouseArrivalStashRadius = 15.0
+
+
+-- ---------------------------------------------------------------------
+-- ★ KATMAN 7 [T2]: MÜHİMMAT DAĞITIM GÖREVİ MANİFESTOSU
+-- Lojistik rütbesindeki (bot.role == 'runner') bir bot, "Mühimmat Dağıtım
+-- Görevi" tetiklendiğinde trap house'un ortak deposundan (matrix_trap_
+-- stash_<id>) BU listedeki kalemleri kendi envanterine (dealer_<id>)
+-- çeker (bkz. server/logistics.lua Matrix.Logistics.DispatchAmmoRun).
+-- Kalemler KASITLI olarak Config.BlackMarket'te ZATEN tanımlı item id'leri
+-- kullanır — yeni bir item icat edilmez. Silahlar mühimmatsız (ayrı
+-- ammo_rifle item'ı yüklenmeden) teslim edilir; bu ox_inventory'nin zaten
+-- var olan silah/mühimmat ayrımıdır.
+-- ---------------------------------------------------------------------
+Config.Logistics.AmmoRunManifest = {
+    { item = 'weapon_assaultrifle', count = 1  }, -- silahsız AK-47 (Config.BlackMarket.Weapons ile aynı item)
+    { item = 'ammo_rifle',          count = 90 }, -- şarjör/mühimmat (Config.BlackMarket.Ammo ile aynı item)
+    { item = 'weapon_spare_barrel', count = 1  }  -- yedek namlu (Config.BlackMarket.SpareBarrelItem ile aynı item)
+}
 
 
 -- ---------------------------------------------------------------------

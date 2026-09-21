@@ -32,9 +32,18 @@
 -- rotasının SON bacağı trap house kapısındaysa, ped silinmeden ÖNCE onu
 -- bucket'a al" gibi bir davranış eklemek isterse main.lua'ya TEK SATIRLIK
 -- bir çağrı (CompleteDispatch'in entity silme adımından ÖNCE) ile
--- bağlanabilir. Şu an için bu dosyanın asıl işlevi — oyuncu giriş/çıkışı,
--- envanter operasyonları — main.lua'dan TAMAMEN bağımsız ve TAM ÇALIŞIR
--- durumdadır; bot-routing salt bir gelecek-genişletme kancasıdır.
+-- bağlanabilir.
+--
+-- ★ KATMAN 7 [T1/T2]: yukarıdaki analiz tam olarak doğrulandı — "bot ped'i
+-- OLMADAN mantıken içeride sayılma" ihtiyacı gerçekten doğdu (Mühimmat
+-- Dağıtım Görevi: bir Lojistik bot dünyada hiç doğmadan trap house
+-- deposundan mühimmat çeker). Bkz. MarkBotForStashRun (aşağıda) — bu, RAM'de
+-- yalnızca bir bayrak (bot.state.interior_trap_house_id, server/main.lua'da
+-- tanımlı) set eder; main.lua'nın Çıkış Köprüsü (ResolveExteriorBridgeOrigin)
+-- bir sonraki fiziksel sevk başladığında bu bayrağı tüketip botu haritanın
+-- gerçek yüzeyine (bu trap house'un fiziki kapı koordinatına) çıkarır ve
+-- SetEntityRoutingBucket(entity, 0) ile dış dünyaya bağlar — RouteBotIntoInterior
+-- (yukarıdaki, canlı bir ped GEREKTİREN) ile ÇAKIŞMAZ, tamamlayıcıdır.
 -- =====================================================================
 
 
@@ -258,6 +267,46 @@ function Matrix.TrapHouseInterior.RouteBotIntoInterior(botId, trapHouseId, botPe
 end
 
 
+-- botId -> trapHouseId, yalnızca /interiordurum debug paneli için (bkz.
+-- aşağıda) — gerçek yönlendirme kararı DAİMA bot.state.interior_trap_house_id
+-- (server/main.lua) üzerinden verilir, bu tablo salt bir yansımadır.
+local BotsMarkedForStashRun = {}
+
+
+--- ★ KATMAN 7 [T1/T2]: bir Lojistik botu, dünyada bir ped'i HİÇ doğmadan
+--- (stash/depo işlemi anında bir canlı ped'e ihtiyaç yok — bkz. dosya başı
+--- yorumu) mantıken bu trap house'un interior hücresinin içinde işaretler.
+--- Gerçek bayrağı server/main.lua'daki Matrix.SetBotInteriorTrapHouse set
+--- eder (main.lua bu dosyadan ÖNCE yüklenir, bkz. fxmanifest.lua) — burası
+--- yalnızca o çağrıyı bu modülün kendi isimlendirme/log/debug disipliniyle
+--- sarmalar. server/logistics.lua Matrix.Logistics.DispatchAmmoRun bunu
+--- (yüklüyse) tercih eder; yüklü değilse doğrudan Matrix.SetBotInteriorTrapHouse'a
+--- düşer (defansif, opsiyonel-modül deseni — bu dosyanın geri kalanıyla AYNI).
+function Matrix.TrapHouseInterior.MarkBotForStashRun(botId, trapHouseId)
+    botId = tonumber(botId)
+    trapHouseId = tonumber(trapHouseId)
+    if not botId or not trapHouseId or not Matrix.TrapHouses[trapHouseId] then return false end
+    if not Matrix.SetBotInteriorTrapHouse then return false end
+
+    local ok = Matrix.SetBotInteriorTrapHouse(botId, trapHouseId)
+    if ok then
+        BotsMarkedForStashRun[botId] = trapHouseId
+        Matrix.Log('TRAPHOUSE',
+            'Bot #%d trap house #%d deposu icin ic mekana isaretlendi (ped YOK -- bkz. Cikis Koprusu, server/main.lua).',
+            botId, trapHouseId)
+    end
+    return ok
+end
+
+
+--- Çıkış Köprüsü tüketildiğinde (bot fiilen sahaya çıktığında) bu yansıma
+--- tablosundan da temizlenir — yalnızca /interiordurum debug paneli doğru
+--- kalsın diye (gerçek durum HER ZAMAN bot.state.interior_trap_house_id'dir).
+function Matrix.TrapHouseInterior.ClearStashRunMark(botId)
+    BotsMarkedForStashRun[tonumber(botId) or botId] = nil
+end
+
+
 -- =====================================================================
 -- ★ KATMAN 6: "MÜHİMMAT / ENVANTER AMELİYATI" — F10 Canlı Kadro bot
 -- aksiyon menüsüne eklenir (bkz. client/hud.lua OpenBotActionsMenu).
@@ -411,6 +460,15 @@ RegisterCommand('interiordurum', function(src)
         end
     end
     Reply(src, ('--- Toplam %d oyuncu bir trap house icinde ---'):format(count))
+
+
+    -- ★ KATMAN 7: ped'i olmadan mantiken icerideki (stash isi yapan) botlar.
+    local stashCount = 0
+    for botId, trapHouseId in pairs(BotsMarkedForStashRun) do
+        stashCount = stashCount + 1
+        Reply(src, ('Bot #%d trap house #%d deposunda (Cikis Koprusu bekliyor, ped yok)'):format(botId, trapHouseId))
+    end
+    Reply(src, ('--- Toplam %d bot depo isleminde ---'):format(stashCount))
 end, false)
 
 
@@ -419,4 +477,10 @@ exports('GetTrapHouseOccupants', function(trapHouseId) return Matrix.TrapHouseIn
 exports('GetPlayerTrapHouse', function(src) return Matrix.TrapHouseInterior.GetPlayerTrapHouse(src) end)
 exports('RouteBotIntoInterior', function(botId, trapHouseId, botPedEntity)
     return Matrix.TrapHouseInterior.RouteBotIntoInterior(botId, trapHouseId, botPedEntity)
+end)
+exports('MarkBotForStashRun', function(botId, trapHouseId)
+    return Matrix.TrapHouseInterior.MarkBotForStashRun(botId, trapHouseId)
+end)
+exports('ClearStashRunMark', function(botId)
+    return Matrix.TrapHouseInterior.ClearStashRunMark(botId)
 end)

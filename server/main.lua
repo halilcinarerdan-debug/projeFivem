@@ -129,6 +129,9 @@ local DeleteEntity              = DeleteEntity
 local SetEntityOrphanMode       = SetEntityOrphanMode
 local SetEntityCoords           = SetEntityCoords
 local SetEntityCoordsNoOffset   = SetEntityCoordsNoOffset
+-- ★ KATMAN 7 [T1]: Çıkış Köprüsü — yeni doğan dispatch entity'lerini her
+-- zaman Bucket 0'a (dış dünya) açıkça bağlamak için.
+local SetEntityRoutingBucket    = SetEntityRoutingBucket
 local GetHashKey                = GetHashKey
 local GetGameTimer              = GetGameTimer
 local NetworkGetNetworkIdFromEntity = NetworkGetNetworkIdFromEntity
@@ -412,7 +415,16 @@ function Matrix.CreateBotRecord(profile)
             is_locked       = false,
             -- ★ [H13] Taktik HUD "Mekanik" bülteni için ham silah aşınması
             -- (1.0 = kusursuz, 0.0 = tamamen erimiş). Bkz. /botmekanik.
-            weapon_wear_level = 1.0
+            weapon_wear_level = 1.0,
+            -- ★ KATMAN 7 [T1]: bot şu an bir trap house'un GTA Online
+            -- interior hücresinde (Config.TrapHouseInterior.Shell, harita
+            -- dışındaki paylaşımlı "interior cebi") mi sayılıyor? nil ise
+            -- hayır. BeginPhysicalDispatch/BeginRouteDispatch bu alanı
+            -- görürse Çıkış Köprüsü'nü (bkz. ResolveExteriorBridgeOrigin)
+            -- devreye sokar. Yalnızca server/logistics.lua'nın Mühimmat
+            -- Dağıtım Görevi gibi "bot depo/stash işlemi yapıyor" akışları
+            -- tarafından set edilir (bkz. Matrix.SetBotInteriorTrapHouse).
+            interior_trap_house_id = nil
         }
     }
 
@@ -590,7 +602,11 @@ local function LoadBotsFromDatabase()
                 net_id          = nil,
                 elapsed_seconds = 0,
                 is_locked       = false,
-                weapon_wear_level = 1.0
+                weapon_wear_level = 1.0,
+                -- ★ KATMAN 7 [T1]: bkz. CreateBotRecord'daki aynı alan yorumu.
+                -- Sunucu yeniden başladığında hiçbir bot fiilen içeride
+                -- SAYILMAZ (kalıcı bir sütun değil — salt runtime bayrağı).
+                interior_trap_house_id = nil
             }
         }
         if row.id >= Matrix.NextBotId then Matrix.NextBotId = row.id + 1 end
@@ -885,6 +901,12 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
             return nil, nil, nil, nil, 'ped_spawn_timeout'
         end
         pcall(SetEntityOrphanMode, ped, 2) -- KeepEntity: server entity'yi asla silmez
+        -- ★ KATMAN 7 [T1] FAZ 2: görev atanmadan HEMEN ÖNCE, entity KOŞULSUZ
+        -- olarak dış dünyaya (Bucket 0) bağlanır — bkz. ResolveExteriorBridgeOrigin
+        -- dosya-başı yorumu. Bot daha önce hangi interior bucket'ında
+        -- sayılıyor olursa olsun, buradan itibaren NavMesh yol ağı DAİMA
+        -- ana dünya (Bucket 0) rotasını kullanır.
+        pcall(SetEntityRoutingBucket, ped, 0)
         SetEntityCoords(ped, origin.x, origin.y, origin.z, false, false, false, false)
 
 
@@ -915,6 +937,9 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
             return nil, nil, nil, nil, 'vehicle_spawn_timeout'
         end
         pcall(SetEntityOrphanMode, vehicle, 2) -- KeepEntity
+        -- ★ KATMAN 7 [T1] FAZ 2: bkz. yaya dalındaki aynı çağrı yorumu —
+        -- araç da sürüş görevi atanmadan ÖNCE koşulsuz Bucket 0'a bağlanır.
+        pcall(SetEntityRoutingBucket, vehicle, 0)
 
 
         ped = CreatePedInsideVehicle(vehicle, 0, pedHash, -1, true, true)
@@ -924,6 +949,7 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
             return nil, nil, nil, nil, 'ped_in_vehicle_timeout'
         end
         pcall(SetEntityOrphanMode, ped, 2) -- KeepEntity
+        pcall(SetEntityRoutingBucket, ped, 0)
 
 
         local taskOk = pcall(TaskVehicleDriveToCoord,
@@ -953,6 +979,86 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
 end
 
 
+-- =====================================================================
+-- ★ KATMAN 7 [T1]: İKİ-FAZLI GTA ONLINE ÇIKIŞ KÖPRÜSÜ (Exit Bridge)
+--
+-- SORUN: Config.TrapHouseInterior.Shell (bkz. shared/config.lua), gerçek
+-- harita sınırlarının tamamen dışındaki paylaşımlı bir GTA Online interior
+-- hücresidir (bob74_ipl GTAOHouseLow1, X:261.46 Y:-998.82 Z:-99.01 — bu
+-- "interior cebi" normal sokak NavMesh ağına HİÇ bağlı değildir). Bir bot
+-- mantıken bu hücrenin içindeyken (server/logistics.lua Mühimmat Dağıtım
+-- Görevi gibi bir depo/stash işlemi onu oraya "koymuşsa" — bkz.
+-- Matrix.SetBotInteriorTrapHouse) doğrudan o hücre koordinatından bir
+-- fiziksel sevk (TaskVehicleDriveToCoord/TaskFollowNavMeshToCoord)
+-- başlatılırsa, NavMesh yol ağı çözülemez ve görev ataması
+-- 'task_assignment_failed' ile başarısız olur (bkz. SpawnDispatchActors);
+-- yakındaki oyunculara mesafe koruması (Işınlanma Guard'ı) da bu
+-- sahte/boşluk koordinatı yüzünden yanlış tetiklenebilir.
+--
+-- ÇÖZÜM (FAZ 1 — burada): BeginPhysicalDispatch/BeginRouteDispatch'in
+-- HER İKİSİ de rota hesaplanmadan ve hiçbir entity dünyaya doğmadan ÖNCE
+-- bu fonksiyonu çağırır. Bot interior hücresindeyse (interior_trap_house_id
+-- doluysa) origin, o Trap House'un GERÇEK harita-yüzeyi kapı koordinatına
+-- (Matrix.TrapHouses[id].coords — Katman 2'den beri var olan, DEĞİŞMEYEN
+-- alan) asenkron olarak köprülenir; interior bayrağı hemen temizlenir.
+-- Bu fazda MinDispatchDistanceMeters (Işınlanma Koruması) guard'ı
+-- YAPISAL OLARAK BAYPAS edilir (ikinci dönüş değeri `true`) — çünkü bu
+-- bacak bir "gerçek" fiziksel yer değiştirme değil, asla var olmamış bir
+-- interior konumundan haritaya ÇIKIŞTIR; mesafe ölçümü buradaki anlamsız
+-- koordinat farkı yüzünden yanlışlıkla sevk'i reddetmemelidir.
+--
+-- FAZ 2 (SpawnDispatchActors içinde, aşağıda ayrıca işaretli): entity
+-- (ped/araç) bu köprülenmiş origin'de doğar doğmaz, herhangi bir görev
+-- atanmadan HEMEN ÖNCE SetEntityRoutingBucket(entity, 0) ile KOŞULSUZ
+-- olarak dış dünyaya (Bucket 0) bağlanır — bot daha önce hangi interior
+-- bucket'ında (Config.TrapHouseInterior.BucketBase+N) sayılıyor olursa
+-- olsun, dış dünyanın asfalta bağlı NavMesh düğümleri artık RAM'e kilitli
+-- olduğu için TaskVehicleDriveToCoord/TaskFollowNavMeshToCoord sıfır
+-- hatayla ateşlenir.
+-- =====================================================================
+local function ResolveExteriorBridgeOrigin(bot, requestedOrigin)
+    local interiorTrapId = bot.state.interior_trap_house_id
+    if not interiorTrapId then
+        return requestedOrigin, false
+    end
+
+    -- İç mekan bayrağı HER DURUMDA temizlenir (bot artık "sahaya çıkıyor") —
+    -- trap house sonradan silinmiş olsa bile bayrağın asılı kalmasına izin
+    -- verilmez. /interiordurum debug panelinin yansıma tablosu da (yüklüyse)
+    -- birlikte temizlenir.
+    bot.state.interior_trap_house_id = nil
+    if Matrix.TrapHouseInterior and Matrix.TrapHouseInterior.ClearStashRunMark then
+        Matrix.TrapHouseInterior.ClearStashRunMark(bot.id)
+    end
+
+    local house = Matrix.TrapHouses and Matrix.TrapHouses[interiorTrapId]
+    if not house or not _SafeVec(house.coords) then
+        Matrix.Log('CORE',
+            '[UYARI] Bot #%d interior köprüsü için trap house #%s bulunamadı; orijinal origin kullanıldı.',
+            bot.id, tostring(interiorTrapId))
+        return requestedOrigin, false
+    end
+
+    Matrix.Log('CORE',
+        '[CIKIS KOPRUSU] Bot #%d GTA Online interior hücresinden (trap #%d) harita yüzeyindeki fiziki kapı koordinatına çıkartıldı: (%.1f,%.1f,%.1f)',
+        bot.id, interiorTrapId, house.coords.x, house.coords.y, house.coords.z)
+
+    return house.coords, true
+end
+
+
+--- ★ KATMAN 7 [T1/T2]: bir botu mantıken bir trap house'un interior
+--- hücresinin içinde işaretler (depo/stash işlemi yapıyor). Bir sonraki
+--- fiziksel sevk (BeginPhysicalDispatch/BeginRouteDispatch), Çıkış
+--- Köprüsü'nü otomatik tetikleyip bu bayrağı tüketir/temizler.
+function Matrix.SetBotInteriorTrapHouse(botId, trapHouseId)
+    local bot = Matrix.Bots[botId]
+    if not bot then return false end
+    bot.state.interior_trap_house_id = trapHouseId
+    return true
+end
+
+
 --- ★ [H8][H12] Fiziksel sevki başlatır (tek hedef). Hata yollarında yarım
 --- kalan entity'ler DÜNYADAN SİLİNİR — hiçbir ped/araç orphan kalmaz.
 --- Co-Op Mutex: bot.state.is_locked true ise sevk hiç başlamaz.
@@ -979,13 +1085,22 @@ function Matrix.BeginPhysicalDispatch(botId, origin, destination, plate, vehicle
     destination = _ToVec3(destination)
 
 
+    -- ★ KATMAN 7 [T1] FAZ 1: bot bir interior hücresindeyse origin buradan
+    -- itibaren o trap house'un GERÇEK harita-yüzeyi kapı koordinatıdır;
+    -- `bridged=true` ise Işınlanma Koruması bu bacak için baypas edilir.
+    local bridged
+    origin, bridged = ResolveExteriorBridgeOrigin(bot, origin)
+
+
     if not _SafeVec(origin) or not _SafeVec(destination) then
         return false, 'corrupt_vector'
     end
 
 
     -- ★ Işınlanma koruması: dünyada ped/araç DOĞMADAN ÖNCE mesafe kontrolü.
-    if #(origin - destination) < Config.Logistics.MinDispatchDistanceMeters then
+    -- Çıkış Köprüsü bacağı (bridged=true) yapısal olarak bu kontrolün
+    -- dışındadır — bkz. ResolveExteriorBridgeOrigin yorumu.
+    if not bridged and #(origin - destination) < Config.Logistics.MinDispatchDistanceMeters then
         return false, 'too_close'
     end
 
@@ -1096,6 +1211,13 @@ function Matrix.BeginRouteDispatch(botId, origin, waypointRefs, finalRef, plate,
     end
 
 
+    -- ★ KATMAN 7 [T1] FAZ 1: bkz. BeginPhysicalDispatch'teki aynı çağrı
+    -- yorumu. Yalnızca origin (rotanın İLK bacağının başlangıcı) köprülenir
+    -- — bu, "interior hücresinden haritaya çıkış" bacağıdır.
+    local bridged
+    origin, bridged = ResolveExteriorBridgeOrigin(bot, origin)
+
+
     if not _SafeVec(origin) or not _SafeVec(finalRef) then return false, 'corrupt_vector' end
     for i = 1, #waypointRefs do
         if not _SafeVec(waypointRefs[i]) then return false, 'corrupt_vector' end
@@ -1110,11 +1232,14 @@ function Matrix.BeginRouteDispatch(botId, origin, waypointRefs, finalRef, plate,
     -- ★ Işınlanma koruması: HER bacak ayrı ayrı doğrulanır, hiçbir entity
     -- dünyaya doğmadan ÖNCE. Hangi bacağın çok kısa olduğunu çağırana
     -- bildirmek için leg index'i (i) ve ölçülen mesafeyi de döndürür.
+    -- ★ [T1]: yalnızca İLK bacak (origin -> routeQueue[1]), bridged=true
+    -- olduğunda bu kontrolün dışındadır — Çıkış Köprüsü SADECE bu bacağı
+    -- kapsar, rotanın geri kalanı normal Işınlanma Koruması'na tabidir.
     local legOrigin = origin
     for i = 1, #routeQueue do
         local legDest = routeQueue[i]
         local legDist = #(legOrigin - legDest)
-        if legDist < Config.Logistics.MinDispatchDistanceMeters then
+        if not (bridged and i == 1) and legDist < Config.Logistics.MinDispatchDistanceMeters then
             return false, 'too_close', i, legDist
         end
         legOrigin = legDest
@@ -1253,6 +1378,11 @@ function Matrix.CompleteDispatch(botId, reason)
     local plate        = dispatch.plate
     local destination  = dispatch.destination
     local lastCoords   = dispatch.last_coords
+    -- ★ KATMAN 7 [T2]: Mühimmat Dağıtım Görevi hedefi (bkz.
+    -- server/logistics.lua Matrix.Logistics.DispatchAmmoRun) — doluysa bu
+    -- sevk, trap house stash'ine değil bir "Tetikçi" bota elden teslimat
+    -- yapıyordu.
+    local ammoRunTargetBotId = dispatch.ammo_run_target_bot_id
 
 
     Matrix.Dispatches[botId] = nil
@@ -1268,6 +1398,20 @@ function Matrix.CompleteDispatch(botId, reason)
             local drop = FindActiveDeadDropAt(destination)
             if drop and Matrix.Supplier and Matrix.Supplier.OnPickup then
                 pcall(Matrix.Supplier.OnPickup, { kind = 'bot', id = botId }, drop.id, nil)
+            end
+
+
+            -- ★ KATMAN 7 [T2]: Mühimmat Dağıtım Görevi'nin son bacağı —
+            -- Lojistik bot, sokakta bekleyen Tetikçi botun (ammoRunTargetBotId)
+            -- konumuna vardı. Elden teslimat + geri dönüş server/logistics.lua
+            -- Matrix.Logistics.OnAmmoRunArrived içinde ele alınır (best-effort,
+            -- pcall-korumalı — bu hook yoksa/başarısız olursa normal 'arrived'
+            -- akışı [trap house stash kontrolü dahil] AYNEN devam eder).
+            if ammoRunTargetBotId and Matrix.Logistics and Matrix.Logistics.OnAmmoRunArrived then
+                local ammoOk, ammoErr = pcall(Matrix.Logistics.OnAmmoRunArrived, botId, ammoRunTargetBotId, destination)
+                if not ammoOk then
+                    Matrix.Log('CORE', '[HATA] OnAmmoRunArrived basarisiz (yutuldu): %s', tostring(ammoErr))
+                end
             end
 
 
@@ -1364,6 +1508,23 @@ function Matrix.TriggerPanicEvacuation(botId, dispatcherSrc)
     if type(dispatcherSrc) ~= 'number' or dispatcherSrc <= 0 then return false, 'bad_dispatcher' end
     local dispatcherPed = GetPlayerPed(dispatcherSrc)
     if not dispatcherPed or dispatcherPed == 0 then return false, 'dispatcher_ped_missing' end
+
+
+    -- ★ KATMAN 7 [T3]: yolda seyir halindeki (aktif dispatch) bir bota
+    -- telsizden müdahale etmek (rota yeniden atamak), dispatcher su an
+    -- /sessizlik altındaysa BİLİNÇLİ bir sessizlik ihlalidir. ENGELLENMEZ
+    -- (acil tahliye kritik olabilir) ama bedelsiz de değildir: server/
+    -- market.lua Matrix.RadioSilence.BreakForRedirect telsiz statik
+    -- parazit şiddetini VE Büro'nun ilgili trap house decryption_confidence
+    -- katsayısını ÜSSEL olarak sıçratır (bkz. o fonksiyonun yorumu).
+    do
+        local dState = Matrix.GetOrCreatePlayerState(dispatcherSrc)
+        if dState and dState.citizenid and Matrix.RadioSilence
+            and Matrix.RadioSilence.IsActive and Matrix.RadioSilence.IsActive(dState.citizenid)
+            and Matrix.RadioSilence.BreakForRedirect then
+            pcall(Matrix.RadioSilence.BreakForRedirect, dState.citizenid, botId, bot.state.trap_house_id)
+        end
+    end
 
 
     local ped = NetworkGetEntityFromNetworkId(dispatch.entity_net_id)
@@ -2402,6 +2563,9 @@ exports('SpawnBot',    function(id, c) return Matrix.SpawnBot(id, c) end)
 exports('DespawnBot',  function(id) return Matrix.DespawnBot(id) end)
 exports('RemoveBot',   function(id, r) return Matrix.RemoveBot(id, r) end)
 exports('GetBot',      function(id) return Matrix.GetBot(id) end)
+exports('SetBotInteriorTrapHouse', function(id, trapHouseId)
+    return Matrix.SetBotInteriorTrapHouse(id, trapHouseId)
+end)
 
 
 exports('BeginPhysicalDispatch', function(botId, origin, destination, plate, vehicleType, eta, src, frictionDivisor)

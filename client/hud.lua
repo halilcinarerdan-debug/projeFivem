@@ -746,6 +746,7 @@ end
 local OpenAssignInspectorDialog -- ileri bildirim (OpenBotActionsMenu tarafından kullanilir)
 local OpenBotInventoryOpsMenu   -- ★ KATMAN 6: ileri bildirim
 local OpenGiveItemToBotDialog   -- ★ KATMAN 6: ileri bildirim
+local OpenAmmoRunDialog         -- ★ KATMAN 7 [T2]: ileri bildirim
 
 
 --- ★ DÜZELTME: butona basıldığı AN (sunucu cevabı beklenmeden) küçük bir
@@ -812,6 +813,19 @@ local function OpenBotActionsMenu(botId, roleLabel)
     end
 
 
+    -- ★ KATMAN 7 [T2]: yalnizca Lojistik rutbesindeki (bot.role == 'runner')
+    -- botlarda gosterilir -- bkz. server/logistics.lua Matrix.Logistics.
+    -- DispatchAmmoRun'daki ayni rol eslemesi yorumu.
+    if roleLabel == 'runner' then
+        options[#options + 1] = {
+            title       = 'Muhimmat Dagitim Gorevi',
+            description = 'Bu lojistik botu trap house deposundan silah/muhimmat/yedek namlu cekip belirttiginiz Tetikci bota (Bot-ID) elden teslim eder.',
+            icon        = 'truck-fast',
+            onSelect    = function() OpenAmmoRunDialog(botId) end
+        }
+    end
+
+
     local menuId = ('matrix_bot_actions_%d'):format(botId)
     lib.registerContext({
         id      = menuId,
@@ -873,6 +887,33 @@ OpenGiveItemToBotDialog = function(botId)
 
     NotifyActionSent(('Bot #%d icin teslimat gonderiliyor...'):format(botId))
     TriggerServerEvent('matrix:server:trapHouseInterior:giveItemToBot', botId, tonumber(slot), tonumber(count))
+end
+
+
+--- ★ KATMAN 7 [T2]: Mühimmat Dağıtım Görevi hedef diyaloğu -- yalnızca
+--- hedef Tetikçi Bot-ID istenir (kaynak lojistik botun ID'si zaten
+--- tıklanan Canlı Kadro satırından biliniyor). Diğer sayısal girdi
+--- diyaloglarıyla AYNI SanitizeNumericArg/ExecuteCommand disiplininden
+--- geçer -- server/logistics.lua /muhimmatsevk komutu tüm gerçek
+--- doğrulamayı (rol, mesafe, sessizlik guard'ı, stash içeriği) sunucu
+--- tarafında ayrıca yapar.
+OpenAmmoRunDialog = function(sourceBotId)
+    local input = lib.inputDialog('Muhimmat Dagitim Gorevi', {
+        {
+            type = 'number', label = 'Hedef Tetikci Bot-ID',
+            description = 'Sokakta pusuya yatmis kurye/tetikci botun Bot-ID numarasi',
+            required = true, min = 1, max = MAX_BOT_ID
+        }
+    })
+    if not input then return end
+
+
+    local targetBotId = SanitizeNumericArg(input[1], 1, MAX_BOT_ID)
+    if not targetBotId then NotifyInvalidInput('Hedef Bot-ID gecersiz.'); return end
+
+
+    NotifyActionSent(('Bot #%d icin muhimmat dagitim gorevi gonderiliyor...'):format(sourceBotId))
+    ExecuteCommand(('muhimmatsevk %d %s'):format(sourceBotId, targetBotId))
 end
 
 

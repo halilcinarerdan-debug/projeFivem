@@ -929,6 +929,17 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatc
     end
 
 
+    -- ★ KATMAN 7 [T3]: /sessizlik altındayken kurye/lojistik botlarına YENİ
+    -- bir sevk emri verilemez (bkz. server/market.lua Matrix.RadioSilence.
+    -- GuardBotDispatch). Zaten yolda olan bir botu telsizden yeniden
+    -- yönlendirmek bu guard'ın kapsamı dışındadır (bkz. server/main.lua
+    -- Matrix.TriggerPanicEvacuation -> Matrix.RadioSilence.BreakForRedirect).
+    if Matrix.RadioSilence and Matrix.RadioSilence.GuardBotDispatch then
+        local silOk, silReason = Matrix.RadioSilence.GuardBotDispatch(dispatcherSrc)
+        if not silOk then return false, silReason end
+    end
+
+
     local origin = bot.state.coords
     if not IsValidCoords(origin) then
         local fallbackHouse = bot.state.trap_house_id and Matrix.TrapHouses and Matrix.TrapHouses[bot.state.trap_house_id]
@@ -1050,6 +1061,180 @@ Matrix.SevkBot = Matrix.Logistics.DispatchDealer
 
 
 -- =====================================================================
+-- ★ KATMAN 7 [T2]: MÜHİMMAT DAĞITIM GÖREVİ — OTONOM DEPO/LOJİSTİK MOTORU
+--
+-- Lojistik rütbesindeki bir bot (bot.role == 'runner' — Config.RoleModels'te
+-- ayrı bir "Lojistik" modeli/rütbesi yok; kurye/lojistik işlevini zaten
+-- 'runner' karşılıyor, bkz. Config.Inspector.PromotableRoles'daki aynı
+-- eşleme), trap house'un ortak kartel deposundan (matrix_trap_stash_<id>,
+-- Config.Logistics.AmmoRunManifest listesi) mühimmatı asenkron olarak
+-- kendi envanterine (dealer_<id>) çeker, ardından sokakta bekleyen bir
+-- Tetikçi bota (targetBotId) otonom sürüşle (Matrix.BeginPhysicalDispatch
+-- -> server/main.lua Çıkış Köprüsü [T1]) ulaşıp elden teslim eder (bkz.
+-- Matrix.Logistics.OnAmmoRunArrived, main.lua CompleteDispatch tarafından
+-- varışta çağrılır) ve trap house'a geri döner.
+-- =====================================================================
+function Matrix.Logistics.DispatchAmmoRun(sourceBotId, targetBotId, dispatcherSrc)
+    sourceBotId = tonumber(sourceBotId)
+    targetBotId = tonumber(targetBotId)
+    if not sourceBotId or not targetBotId then return false, 'bad_bot_id' end
+    if sourceBotId == targetBotId then return false, 'same_bot' end
+
+    local sourceBot = Matrix.Bots[sourceBotId]
+    if not sourceBot then return false, 'bot_missing' end
+    if sourceBot.role ~= 'runner' then return false, 'not_logistics' end
+    if sourceBot.state.is_locked or (Matrix.Dispatches and Matrix.Dispatches[sourceBotId]) then
+        return false, 'already_dispatched'
+    end
+
+    local targetBot = Matrix.Bots[targetBotId]
+    if not targetBot then return false, 'target_missing' end
+    if not IsValidCoords(targetBot.state.coords) then return false, 'target_no_coords' end
+
+    local trapHouseId = sourceBot.state.trap_house_id
+    local house = trapHouseId and Matrix.TrapHouses and Matrix.TrapHouses[trapHouseId]
+    if not house then return false, 'no_trap_house' end
+
+    -- ★ [T3] /sessizlik altındayken YENİ bir mühimmat dağıtım görevi
+    -- başlatılamaz (bkz. server/market.lua Matrix.RadioSilence.GuardBotDispatch).
+    if Matrix.RadioSilence and Matrix.RadioSilence.GuardBotDispatch then
+        local silOk, silReason = Matrix.RadioSilence.GuardBotDispatch(dispatcherSrc)
+        if not silOk then return false, silReason end
+    end
+
+    -- Depodan (matrix_trap_stash_<id>) kaynak botun envanterine (dealer_<id>)
+    -- manifestoyu asenkron çek. Stash'te eksik/yetersiz kalem varsa o kalem
+    -- SESSİZCE atlanır (best-effort — DepositDealerCargoToTrapStash ile aynı
+    -- disiplin); hiçbir kalem çekilemezse görev başlamadan iptal edilir.
+    local stashId     = ('matrix_trap_stash_%d'):format(trapHouseId)
+    local inventoryId = ('dealer_%d'):format(sourceBotId)
+    pcall(function()
+        exports['ox_inventory']:RegisterStash(stashId, (house.label or ('Trap #' .. trapHouseId)) .. ' Deposu', 100, 200000)
+    end)
+
+    local pulled = {}
+    for _, entry in ipairs(Config.Logistics.AmmoRunManifest) do
+        local removeOk = pcall(function()
+            return exports['ox_inventory']:RemoveItem(stashId, entry.item, entry.count)
+        end)
+        if removeOk then
+            local addOk = pcall(function()
+                return exports['ox_inventory']:AddItem(inventoryId, entry.item, entry.count)
+            end)
+            if addOk then
+                pulled[#pulled + 1] = ('%sx%d'):format(entry.item, entry.count)
+            else
+                -- Bota eklenemedi (envanter dolu) -- depoya iade et.
+                pcall(function() exports['ox_inventory']:AddItem(stashId, entry.item, entry.count) end)
+            end
+        end
+    end
+
+    if #pulled == 0 then return false, 'stash_empty' end
+
+    -- ★ [T1] Bot bu andan itibaren mantıken trap house interior hücresinde
+    -- sayılır -- bir sonraki fiziksel sevk (hemen aşağıda), server/main.lua
+    -- Çıkış Köprüsü'nü otomatik tetikleyip bu bayrağı tüketecek. server/
+    -- trap_house_interior.lua yüklüyse onun (debug paneli için de kayıt
+    -- tutan) sarmalayıcısı tercih edilir; değilse main.lua'nın ham
+    -- primitive'ine düşülür (defansif, opsiyonel-modül deseni).
+    if Matrix.TrapHouseInterior and Matrix.TrapHouseInterior.MarkBotForStashRun then
+        Matrix.TrapHouseInterior.MarkBotForStashRun(sourceBotId, trapHouseId)
+    elseif Matrix.SetBotInteriorTrapHouse then
+        Matrix.SetBotInteriorTrapHouse(sourceBotId, trapHouseId)
+    end
+
+    local plate = PermanentVehicleByBot[sourceBotId]
+    local vehicle = plate and Matrix.Fleet.GetVehicle(plate)
+    local vehicleType = vehicle and vehicle.vehicle_class or 'car'
+    if plate and (not vehicle or (ActiveVehicleLocks[plate] and ActiveVehicleLocks[plate] ~= sourceBotId)) then
+        plate, vehicleType = nil, 'car'
+    end
+    if plate then ActiveVehicleLocks[plate] = sourceBotId end
+
+    local distance    = VectorDistance(house.coords, targetBot.state.coords)
+    local profile      = GetVehicleProfile(vehicleType)
+    local etaSeconds   = Matrix.Clamp(distance / (Config.Logistics.BaseSpeedUnitsPerSecond * profile.SpeedCoefficient), 0.0, math_huge)
+
+    local ok, reason = Matrix.BeginPhysicalDispatch(
+        sourceBotId, house.coords, targetBot.state.coords, plate, vehicleType, etaSeconds, dispatcherSrc, 1.0
+    )
+    if not ok then
+        if plate then ActiveVehicleLocks[plate] = nil end
+        sourceBot.state.interior_trap_house_id = nil
+        return false, reason or 'dispatch_failed'
+    end
+
+    Matrix.Dispatches[sourceBotId].ammo_run_target_bot_id = targetBotId
+
+    Matrix.Log('LOGISTICS',
+        '[MUHIMMAT DAGITIM GOREVI] Lojistik Bot #%d -> Tetikci Bot #%d icin depodan yuklenip yola cikti. Yuk: %s',
+        sourceBotId, targetBotId, table.concat(pulled, ', '))
+
+    return true, etaSeconds
+end
+
+
+--- ★ [T2] main.lua CompleteDispatch('arrived') tarafından, lojistik bot
+--- Tetikçi botun konumuna vardığında çağrılır: kaynak botun TÜM envanterini
+--- (dealer_<sourceBotId>) hedef bota (dealer_<targetBotId>) elden teslim
+--- eder, ardından kaynak botu aynı fiziksel sevk motoruyla (ışınlanma
+--- olmadan, normal bir dispatch olarak) trap house'a geri yollar.
+function Matrix.Logistics.OnAmmoRunArrived(sourceBotId, targetBotId, arrivalCoords)
+    local sourceBot = Matrix.Bots[sourceBotId]
+    local targetBot = Matrix.Bots[targetBotId]
+    if not sourceBot or not targetBot then return false end
+
+    local fromInv = ('dealer_%d'):format(sourceBotId)
+    local toInv    = ('dealer_%d'):format(targetBotId)
+
+    local invOk, inv = pcall(exports['ox_inventory'].GetInventory, exports['ox_inventory'], fromInv)
+    local movedAny = false
+    if invOk and type(inv) == 'table' and type(inv.items) == 'table' then
+        for slot, item in pairs(inv.items) do
+            if type(item) == 'table' and type(item.name) == 'string' and (tonumber(item.count) or 0) > 0 then
+                local addOk = pcall(function()
+                    return exports['ox_inventory']:AddItem(toInv, item.name, item.count, item.metadata)
+                end)
+                if addOk then
+                    pcall(function() exports['ox_inventory']:RemoveItem(fromInv, item.name, item.count, item.metadata, slot) end)
+                    movedAny = true
+                end
+            end
+        end
+    end
+
+    Matrix.Log('LOGISTICS',
+        '[MUHIMMAT TESLIMI] Lojistik Bot #%d -> Tetikci Bot #%d elden teslimat %s.',
+        sourceBotId, targetBotId, movedAny and 'tamamlandi' or 'BOS ENVANTER (atlandi)')
+
+    -- Kirli eve geri dönüş: aynı fiziksel sevk motoru, bağımsız bir sevk
+    -- olarak. CompleteDispatch bu bacağın SONUNDA zaten TrapHouseArrivalStashRadius
+    -- kontrolünü kendisi yapıp DepositDealerCargoToTrapStash'i çağıracaktır
+    -- (bot artık boş olduğundan bu çağrı zararsız bir no-op'tur) -- burada
+    -- ekstra bir özel-durum icat edilmez.
+    local trapHouseId = sourceBot.state.trap_house_id
+    local house = trapHouseId and Matrix.TrapHouses and Matrix.TrapHouses[trapHouseId]
+    if house and Matrix.BeginPhysicalDispatch then
+        SetTimeout(100, function()
+            if sourceBot.state.is_locked or (Matrix.Dispatches and Matrix.Dispatches[sourceBotId]) then return end
+            local plate = PermanentVehicleByBot[sourceBotId]
+            local vehicle = plate and Matrix.Fleet.GetVehicle(plate)
+            local vehicleType = vehicle and vehicle.vehicle_class or 'car'
+            if plate and not vehicle then plate = nil end
+            if plate then ActiveVehicleLocks[plate] = sourceBotId end
+            local ok = Matrix.BeginPhysicalDispatch(
+                sourceBotId, arrivalCoords, house.coords, plate, vehicleType, 0.0, nil, 1.0
+            )
+            if not ok and plate then ActiveVehicleLocks[plate] = nil end
+        end)
+    end
+
+    return movedAny
+end
+
+
+-- =====================================================================
 -- KATMAN 5: CO-OP KOMUTA YETKİSİ GUARD'I
 -- =====================================================================
 local function HasCommandAuthority(src)
@@ -1088,7 +1273,25 @@ local DISPATCH_FAILURE_MESSAGES = {
     vehicle_assigned_elsewhere  = 'Araç başka bir bota kalıcı olarak atanmış.',
     vehicle_in_use              = 'Araç şu anda başka bir sevkiyatta kullanılıyor.',
     dispatch_failed             = 'Fiziksel sevk başlatılamadı.',
-    task_assignment_failed      = 'Görev atama basarisiz (fiziksel sevk iptal edildi).'
+    task_assignment_failed      = 'Görev atama basarisiz (fiziksel sevk iptal edildi).',
+    radio_silence_active        = 'Telsiz sessizliği aktif -- bu süre boyunca yeni sevk/rota komutları engellidir.'
+}
+
+
+-- ★ KATMAN 7 [T2]
+local AMMO_RUN_FAILURE_MESSAGES = {
+    bad_bot_id            = 'Geçersiz bot ID.',
+    same_bot               = 'Kaynak ve hedef bot aynı olamaz.',
+    bot_missing            = 'Lojistik bot matriste bulunamadı.',
+    not_logistics          = 'Bu bot Lojistik (runner) rütbesinde değil.',
+    already_dispatched      = 'Lojistik bot zaten sevk halinde.',
+    target_missing          = 'Hedef Tetikçi bot matriste bulunamadı.',
+    target_no_coords        = 'Hedef Tetikçi botun bilinen bir konumu yok.',
+    no_trap_house           = 'Lojistik bota atanmış bir trap house yok.',
+    radio_silence_active    = 'Telsiz sessizliği aktif -- bu süre boyunca yeni görev verilemez.',
+    stash_empty             = 'Trap house deposunda dağıtılacak mühimmat yok.',
+    dispatch_failed         = 'Fiziksel sevk başlatılamadı.',
+    task_assignment_failed  = 'Görev atama basarisiz (fiziksel sevk iptal edildi).'
 }
 
 
@@ -1129,6 +1332,31 @@ RegisterCommand('sevket', function(src, args)
         Reply(src, ('Bot #%d fiziksel sevke alindi. Tahmini varis: %.1f sn'):format(botId, etaOrReason))
     else
         Reply(src, DISPATCH_FAILURE_MESSAGES[etaOrReason] or ('Sevk basarisiz: %s'):format(tostring(etaOrReason)))
+    end
+end, false)
+
+
+-- ★ KATMAN 7 [T2]: F10 Canlı Kadro -> "Mühimmat Dağıtım Görevi" (bkz.
+-- client/hud.lua OpenAmmoRunDialog) bu komutu tetikler.
+RegisterCommand('muhimmatsevk', function(src, args)
+    if not HasCommandAuthority(src) then
+        Reply(src, 'Bu gorevi vermek icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
+    end
+
+
+    local sourceBotId = tonumber(args[1])
+    local targetBotId = tonumber(args[2])
+    if not sourceBotId or not targetBotId then
+        Reply(src, 'Kullanim: /muhimmatsevk [lojistikBotId] [tetikciBotId]'); return
+    end
+
+
+    local ok, etaOrReason = Matrix.Logistics.DispatchAmmoRun(sourceBotId, targetBotId, src)
+    if ok then
+        Reply(src, ('Bot #%d muhimmat dagitim gorevine cikti (hedef: Tetikci Bot #%d). Tahmini varis: %.1f sn'):format(
+            sourceBotId, targetBotId, etaOrReason))
+    else
+        Reply(src, AMMO_RUN_FAILURE_MESSAGES[etaOrReason] or ('Gorev baslatilamadi: %s'):format(tostring(etaOrReason)))
     end
 end, false)
 
@@ -1338,6 +1566,9 @@ end)
 -- =====================================================================
 exports('DispatchDealer', function(botId, dest, vehicleRef, dispatcherSrc)
     return Matrix.Logistics.DispatchDealer(botId, dest, vehicleRef, dispatcherSrc)
+end)
+exports('DispatchAmmoRun', function(sourceBotId, targetBotId, dispatcherSrc)
+    return Matrix.Logistics.DispatchAmmoRun(sourceBotId, targetBotId, dispatcherSrc)
 end)
 exports('ApplyCombatDamageToDealer', function(botId, dmg)
     return Matrix.Logistics.ApplyCombatDamage(botId, dmg)

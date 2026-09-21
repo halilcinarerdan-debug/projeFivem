@@ -400,12 +400,19 @@ end, false)
 -- 3) TELSİZ SESSİZLİĞİ MODU
 -- =====================================================================
 local SilenceExpiry = {}
+-- ★ KATMAN 7 [T3]: sessizlik ihlali (BreakForRedirect) sayacı, citizenid
+-- başına ardışık kırılma sayısını tutar — geometrik ceza büyümesi buradan
+-- beslenir. /sessizlik yeniden başlatıldığında (Start, aşağıda) sıfırlanır.
+local SilenceBreakCount = {}
 
 
 function Matrix.RadioSilence.Start(citizenid, minutes)
     if type(citizenid) ~= 'string' or citizenid == '' then return false end
     minutes = Matrix.Clamp(tonumber(minutes) or 5.0, 1.0, Config.RadioSilence.MaxDurationMinutes)
     SilenceExpiry[citizenid] = Matrix.Now() + math.floor(minutes * 60.0)
+    -- ★ [T3] Temiz sayfa: yeni bir sessizlik penceresi, önceki ihlallerin
+    -- geometrik cezasını miras almaz.
+    SilenceBreakCount[citizenid] = nil
     return true, minutes
 end
 
@@ -426,6 +433,73 @@ function Matrix.RadioSilence.IsActiveForSource(src)
     if type(src) ~= 'number' or src <= 0 then return false end
     local state = Matrix.GetOrCreatePlayerState(src)
     return state ~= nil and Matrix.RadioSilence.IsActive(state.citizenid)
+end
+
+
+-- =====================================================================
+-- ★ KATMAN 7 [T3]: SESSİZLİK ALTINDA YENİ SEVK/ROTA GUARD'I
+-- server/logistics.lua Matrix.Logistics.DispatchDealer VE
+-- Matrix.Logistics.DispatchAmmoRun tarafından, fiziksel sevk hiç
+-- başlamadan ÖNCE çağrılır: dispatcher /sessizlik altındaysa lojistik/
+-- kurye botlarına YENİ bir rota/komut fırlatılması siber koruma amacıyla
+-- TAMAMEN engellenir (dönüş: false, 'radio_silence_active'). Zaten
+-- YOLDA olan (aktif dispatch) bir botu telsizden yeniden yönlendirmek
+-- BU GUARD'IN KAPSAMI DIŞINDADIR — bkz. BreakForRedirect (aşağıda),
+-- server/main.lua Matrix.TriggerPanicEvacuation'dan çağrılır.
+-- =====================================================================
+function Matrix.RadioSilence.GuardBotDispatch(dispatcherSrc)
+    if type(dispatcherSrc) ~= 'number' or dispatcherSrc <= 0 then return true end
+    local state = Matrix.GetOrCreatePlayerState(dispatcherSrc)
+    if not state or not state.citizenid then return true end
+    if Matrix.RadioSilence.IsActive(state.citizenid) then
+        return false, 'radio_silence_active'
+    end
+    return true
+end
+
+
+-- =====================================================================
+-- ★ KATMAN 7 [T3]: SESSİZLİK İHLALİ — YOLDAKİ BOTA TELSİZ MÜDAHALESİ
+-- dispatcher /sessizlik altındayken, zaten aktif bir dispatch'te olan bir
+-- bota (örn. Acil Tahliye ile) telsizden bilinçli olarak müdahale
+-- edildiğinde çağrılır. Engellemez — yalnızca bir bedel uygular:
+--   1) o dispatch'in orijinal dispatcher'ına (dispatch.dispatcher_src)
+--      Matrix.Radio.ApplyStatic ile artan şiddette statik parazit,
+--   2) botun trap house'unun Büro decryption_confidence katsayısına
+--      (Matrix.Bureau.AdvanceDecryption) artan büyüklükte bir sıçrama.
+-- Her ikisi de SilenceBreakCount[citizenid]'e göre Config.RadioSilence.
+-- BreakGeometricFactor ÜSSEL katsayısıyla büyür — art arda ihlaller
+-- katlanarak pahalılaşır (Zero RNG: tamamen deterministik).
+-- =====================================================================
+function Matrix.RadioSilence.BreakForRedirect(citizenid, botId, trapHouseId)
+    if type(citizenid) ~= 'string' or citizenid == '' then return 0.0, 0.0 end
+
+    local n = (SilenceBreakCount[citizenid] or 0) + 1
+    SilenceBreakCount[citizenid] = n
+    local geometricStep = Config.RadioSilence.BreakGeometricFactor ^ (n - 1)
+
+    local staticIntensity = Matrix.Clamp(Config.RadioSilence.BreakBaseStatic * geometricStep, 0.0, 1.0)
+    local decryptionSpike = Config.RadioSilence.BreakBaseDecryptionGain * geometricStep
+
+    local dispatch  = (botId and Matrix.Dispatches) and Matrix.Dispatches[botId] or nil
+    local targetSrc = dispatch and dispatch.dispatcher_src
+    if targetSrc and Matrix.Radio and Matrix.Radio.ApplyStatic then
+        Matrix.Radio.ApplyStatic(targetSrc, staticIntensity, 'sessizlik_bozuldu')
+    end
+
+    local resolvedTrapId = trapHouseId
+    if not resolvedTrapId and botId and Matrix.Bots[botId] then
+        resolvedTrapId = Matrix.Bots[botId].state.trap_house_id
+    end
+    if resolvedTrapId and Matrix.Bureau and Matrix.Bureau.AdvanceDecryption then
+        Matrix.Bureau.AdvanceDecryption(resolvedTrapId, decryptionSpike)
+    end
+
+    Matrix.Log('MARKET',
+        '[SESSIZLIK BOZULDU] %s -> Bot #%s icin telsiz mudahalesi (#%d. ardisik kirilma). Statik:%.2f Desifre-Sicramasi:+%.4f',
+        citizenid, tostring(botId), n, staticIntensity, decryptionSpike)
+
+    return staticIntensity, decryptionSpike
 end
 
 
@@ -1362,6 +1436,10 @@ exports('FindNearestMarketZone',function(coords) return Matrix.Market.FindNeares
 
 exports('StartRadioSilence',    function(cid, minutes) return Matrix.RadioSilence.Start(cid, minutes) end)
 exports('IsRadioSilent',        function(cid) return Matrix.RadioSilence.IsActive(cid) end)
+exports('GuardBotDispatch',     function(src) return Matrix.RadioSilence.GuardBotDispatch(src) end)
+exports('BreakRadioSilenceForRedirect', function(cid, botId, trapHouseId)
+    return Matrix.RadioSilence.BreakForRedirect(cid, botId, trapHouseId)
+end)
 
 
 exports('DepositDirtyCash',     function(trapHouseId, amount) return Matrix.CashDecay.Deposit(trapHouseId, amount) end)
